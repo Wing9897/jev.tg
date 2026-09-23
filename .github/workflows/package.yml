@@ -1,0 +1,150 @@
+name: Package
+
+# Branch pushes publish a release. Tag pushes are not a trigger, so the
+# tag created below cannot start another run.
+"on":
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - master
+
+permissions:
+  contents: write
+  actions: write
+
+concurrency:
+  group: package-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  package:
+    name: Package (${{ matrix.os }})
+    if: ${{ github.actor != 'github-actions[bot]' && !contains(github.event.head_commit.message || '', '[skip release]') }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            artifact_name: jev-tg-windows
+            artifact_path: dist/jev-tg.exe
+          - os: macos-latest
+            artifact_name: jev-tg-macos
+            artifact_path: dist/JEV-Telegram-Filter.dmg
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install uv and Python
+        uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+          enable-cache: true
+
+      - name: Install Python dependencies
+        run: uv sync --extra tray --frozen
+
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Build web
+        working-directory: web
+        run: |
+          npm ci
+          npm run build
+
+      - name: Package with PyInstaller
+        run: uv run --extra tray --frozen pyinstaller --noconfirm --clean packaging/jev_tg.spec
+
+      - name: Create DMG
+        if: runner.os == 'macOS'
+        run: |
+          set -euo pipefail
+          app="dist/JEV Telegram Filter.app"
+          test -d "$app"
+          hdiutil create \
+            -volname "JEV Telegram Filter" \
+            -srcfolder "$app" \
+            -ov \
+            -format UDZO \
+            "dist/JEV-Telegram-Filter.dmg"
+
+      - name: Upload package
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: ${{ matrix.artifact_path }}
+          if-no-files-found: error
+
+  release:
+    name: Publish GitHub Release
+    needs: package
+    runs-on: ubuntu-latest
+    if: ${{ needs.package.result == 'success' && github.actor != 'github-actions[bot]' && !contains(github.event.head_commit.message || '', '[skip release]') }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download packages
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          pattern: jev-tg-*
+          merge-multiple: true
+
+      - name: Tag and publish release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TARGET_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+
+          exe="$(find release-assets -type f -name 'jev-tg.exe' -print -quit)"
+          dmg="$(find release-assets -type f -name 'JEV-Telegram-Filter.dmg' -print -quit)"
+          if [[ -z "${exe}" || -z "${dmg}" ]]; then
+            echo "Both jev-tg.exe and JEV-Telegram-Filter.dmg are required; not publishing."
+            find release-assets -type f -print || true
+            exit 1
+          fi
+
+          sha="$(git rev-parse HEAD)"
+          if [[ "${sha}" != "${TARGET_SHA}" ]]; then
+            echo "Refusing to tag ${sha}; workflow SHA is ${TARGET_SHA}."
+            exit 1
+          fi
+
+          short="$(git rev-parse --short=7 HEAD)"
+          iso="$(git show -s --format=%cI HEAD)"
+          stamp="$(date -u -d "${iso}" +%Y%m%d.%H%M%S)"
+          tag="v${stamp}"
+
+          set +e
+          git ls-remote --exit-code --tags origin "refs/tags/${tag}" >/dev/null 2>&1
+          status=$?
+          set -e
+          if [[ "${status}" -eq 0 ]]; then
+            tag="${tag}.${short}"
+          elif [[ "${status}" -ne 2 ]]; then
+            echo "Could not check whether the tag already exists (git ls-remote exit ${status})."
+            exit 1
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "${tag}" -m "Automatic build of ${sha}"
+          git push origin "refs/tags/${tag}"
+
+          printf 'Automatic build of %s.\n\n- jev-tg.exe\n- JEV-Telegram-Filter.dmg\n' "${sha}" > release-notes.txt
+          gh release create "${tag}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --title "${tag}" \
+            --latest \
+            --notes-file release-notes.txt \
+            "${exe}" \
+            "${dmg}"

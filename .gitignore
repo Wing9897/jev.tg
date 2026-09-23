@@ -1,0 +1,42 @@
+.venv/
+__pycache__/
+/build/
+/dist/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+data/
+web/node_modules/
+web/dist/
+web/.vite/
+*.log
+*.tsbuildinfo
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Secrets. data/ already covers the SQLite database, Fernet key, and Telegram session.
+# These extra names catch the same files if they are copied outside data/.
+.env
+.env.*
+*.pem
+*.session
+*.session.txt
+telegram.session.txt
+secret.key
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+credentials.json
+credentials.txt
+*.credentials
+*api-key*.txt
+*api-key*.json
+*api_key*.txt
+*api_key*.json
+
+# Vite resolves .js before .ts/.tsx, so compiled shadows next to sources must stay untracked.
+web/src/**/*.js
+web/src/**/*.jsx
+web/src/**/*.js.map

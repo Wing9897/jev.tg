@@ -1,0 +1,46 @@
+[project]
+name = "jev-telegram-filter"
+version = "0.1.0"
+description = "JEV Telegram filter — Telethon ingest + TypeSafe Jev batch scoring"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi==0.115.6",
+    "uvicorn[standard]==0.34.0",
+    "aiosqlite==0.19.0",
+    "pydantic==2.12.5",
+    "sse-starlette==3.0.3",
+    "telethon==1.40.0",
+    "typesafe-sdk==0.7.0",
+    "cryptography==49.0.0",
+    "pillow==11.1.0",
+]
+
+# Optional local decision model. Not imported at startup.
+#   uv sync --extra laya
+# Checkpoint used by the app: convaiinnovations/laya-multilingual (laya==0.3.6).
+# Tray icon and PyInstaller. pytest does not install this extra.
+# pillow is already a core dependency. Launch: uv run --extra tray python -m server.tray
+[project.optional-dependencies]
+laya = ["laya==0.3.6"]
+tray = [
+    "pystray==0.19.5",
+    "pyinstaller==6.15.0",
+]
+
+[project.scripts]
+jev-tg = "server.__main__:main"
+jev-tg-tray = "server.tray:main"
+
+[build-system]
+requires = ["setuptools>=77.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["server*"]
+
+[tool.uv]
+package = false
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
