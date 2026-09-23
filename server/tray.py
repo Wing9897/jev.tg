@@ -6,7 +6,8 @@ Dev::
 
 The frozen executable uses the same entry. It binds the existing FastAPI app
 on 127.0.0.1 and shows only a tray icon. Quitting the tray stops uvicorn so
-Telegram disconnects with the server lifespan.
+Telegram disconnects with the server lifespan, then removes the icon and
+exits this process. The menu callback only schedules that work.
 """
 
 from __future__ import annotations
@@ -18,6 +19,7 @@ import socket
 import threading
 import time
 import webbrowser
+from collections.abc import Callable
 from dataclasses import dataclass
 
 import uvicorn
@@ -29,6 +31,7 @@ MENU_QUIT = "結束"
 _TRAY_NAME = "jev_tg"
 _START_TIMEOUT_SECONDS = 30.0
 _STOP_TIMEOUT_SECONDS = 30.0
+_QUIT_JOIN_SECONDS = 0.5
 
 logger = logging.getLogger(__name__)
 
@@ -132,6 +135,101 @@ def stop_server(running: RunningServer | None) -> None:
             logger.error("Server thread did not exit after the tray quit")
 
 
+def quit_steps(owns_server: bool) -> tuple[str, ...]:
+    """Order of work for 結束.
+
+    ``owns_server`` is false when this process found the port already taken and
+    must not stop the other server. ``stop_icon`` and the process exit still run
+    so Windows can drop this tray icon.
+    """
+    steps: list[str] = []
+    if owns_server:
+        steps.append("stop_server")
+    steps.append("stop_icon")
+    steps.append("exit_if_threads_remain")
+    return tuple(steps)
+
+
+def request_quit(icon: object, running: RunningServer | None) -> None:
+    """Schedule 結束 and return.
+
+    On Windows the menu callback is the tray thread. ``Icon.stop()`` only posts
+    a quit message; the loop cannot remove the icon until that callback returns.
+    Stopping the server or joining threads here wedges that loop, so the
+    notification icon stays after the page is already dead.
+    """
+    threading.Thread(
+        target=perform_quit,
+        args=(icon, running),
+        name="jev-tray-quit",
+        daemon=True,
+    ).start()
+
+
+def perform_quit(
+    icon: object,
+    running: RunningServer | None,
+    *,
+    exit_process: Callable[[int], None] = os._exit,
+) -> None:
+    """Run :func:`quit_steps` off the tray thread."""
+    for step in quit_steps(owns_server=running is not None):
+        try:
+            if step == "stop_server":
+                stop_server(running)
+            elif step == "stop_icon":
+                stop_tray_icon(icon)
+            elif step == "exit_if_threads_remain":
+                exit_if_threads_remain(exit_process=exit_process)
+        except Exception:
+            logger.exception("Tray quit step %s failed", step)
+            if step == "exit_if_threads_remain":
+                exit_process(0)
+
+
+def stop_tray_icon(icon: object) -> None:
+    """Ask pystray to delete the notification icon, then leave its loop."""
+    try:
+        icon.visible = False  # type: ignore[attr-defined]
+    except Exception:
+        logger.exception("Could not hide the tray icon")
+    icon.stop()  # type: ignore[attr-defined]
+
+
+def exit_if_threads_remain(
+    *,
+    exit_process: Callable[[int], None] = os._exit,
+    join_timeout: float = _QUIT_JOIN_SECONDS,
+) -> bool:
+    """Join non-daemon threads briefly, then force-exit if any are still alive.
+
+    Uvicorn and Telethon threads are non-daemon. If they outlive the icon loop,
+    the process never ends and Windows keeps the tray icon. Returns True when
+    ``exit_process`` was called.
+    """
+    current = threading.current_thread()
+    blockers = [
+        thread
+        for thread in threading.enumerate()
+        if thread is not current and thread.is_alive() and not thread.daemon
+    ]
+    deadline = time.monotonic() + join_timeout
+    for thread in blockers:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        thread.join(timeout=remaining)
+    still_alive = [thread for thread in blockers if thread.is_alive()]
+    if not still_alive:
+        return False
+    logger.warning(
+        "Tray process still has non-daemon threads after quit: %s",
+        ", ".join(thread.name for thread in still_alive),
+    )
+    exit_process(0)
+    return True
+
+
 def run_tray(running: RunningServer | None) -> None:
     import pystray
 
@@ -140,9 +238,14 @@ def run_tray(running: RunningServer | None) -> None:
     def open_page(_icon: pystray.Icon, _item: pystray.MenuItem) -> None:
         webbrowser.open(url)
 
+    scheduled = False
+
     def quit_app(icon: pystray.Icon, _item: pystray.MenuItem) -> None:
-        stop_server(running)
-        icon.stop()
+        nonlocal scheduled
+        if scheduled:
+            return
+        scheduled = True
+        request_quit(icon, running)
 
     menu = pystray.Menu(
         pystray.MenuItem(MENU_OPEN, open_page, default=True),
@@ -165,7 +268,9 @@ def main() -> None:
         code = 1
     finally:
         stop_server(running)
-    # pystray can leave a non-daemon thread after the icon stops.
+    # 結束 normally force-exits from the quit thread. This covers the path
+    # where the icon loop returned and leftover non-daemon threads would
+    # otherwise keep the notification icon on screen.
     os._exit(code)
 
 
