@@ -1,5 +1,6 @@
 import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
-import { memo, useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode, type RefObject } from "react";
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type MutableRefObject, type ReactNode, type RefObject } from "react";
+import { createPortal } from "react-dom";
 import { api, errorText } from "../api";
 import { notifyTasksSnapshot, SETTINGS_CHANGED_EVENT, TASKS_CHANGED_EVENT } from "../channelSync";
 import { formatWhen } from "../billingFormat";
@@ -9,6 +10,7 @@ import { matchesQuery, SearchBox } from "../components/fields";
 import { LanguageSwitch } from "../components/LanguageSwitch";
 import { clampConcurrency, CONCURRENCY_DEFAULT } from "../concurrency";
 import { useI18n } from "../i18n/context";
+import { intlTag, messages, type Locale } from "../i18n/messages";
 import { PanelLink } from "../panelFocus";
 import { openShellDialog } from "../shellDialogs";
 import { MAX_SIMULTANEOUS_FLIGHTS, type Flight } from "../stage/flights";
@@ -18,7 +20,7 @@ import type { BatchResult, HitExtract, HitImage, SseEnvelope, StageSnapshot, Tag
 const BATCH_FAIL = "\0batch-fail";
 const BATCH_ERROR_HIDE_MS = 10_000;
 const SNAP = { type: "tween" as const, duration: 0.16, ease: "easeOut" as const };
-const HIT_FLY = { type: "tween" as const, duration: 0.32, ease: "easeOut" as const };
+const HIT_FLY = { type: "tween" as const, duration: 0.3, ease: "easeOut" as const };
 const MISS_FADE = { type: "tween" as const, duration: 0.18, ease: "easeOut" as const };
 const HANDOFF = { type: "tween" as const, duration: 0.3, ease: "easeOut" as const };
 const ROW_FADE = { type: "tween" as const, duration: 0.18, ease: "easeOut" as const };
@@ -98,6 +100,83 @@ function asWorkerList(raw: unknown): WorkerState[] {
 
 const HITS_PAGE_SIZE = 40;
 const HITS_SCROLL_EDGE = 280;
+const FRESH_MS = 460;
+
+const imageUrlCache = new WeakMap<HitImage, string>();
+
+function stableImageUrl(image: HitImage) {
+  const cached = imageUrlCache.get(image);
+  if (cached) return cached;
+  const url = `data:${image.mime};base64,${image.base64}`;
+  imageUrlCache.set(image, url);
+  return url;
+}
+
+function sameTags(a: Tag[], b: Tag[]) {
+  if (a === b) return true;
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i += 1) {
+    if (a[i].id !== b[i].id || a[i].key !== b[i].key || a[i].label !== b[i].label || a[i].updatedAt !== b[i].updatedAt) return false;
+  }
+  return true;
+}
+
+function sameTasks(a: Task[], b: Task[]) {
+  if (a === b) return true;
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i += 1) {
+    const left = a[i];
+    const right = b[i];
+    if (left.id !== right.id || left.name !== right.name || left.enabled !== right.enabled || left.updatedAt !== right.updatedAt) return false;
+    if (left.priority !== right.priority || left.batchSize !== right.batchSize || left.hitThreshold !== right.hitThreshold) return false;
+    if (left.pool.total !== right.pool.total || left.pool.analyzed !== right.pool.analyzed) return false;
+    if ((left.usage?.calls ?? 0) !== (right.usage?.calls ?? 0) || (left.usage?.tokens ?? 0) !== (right.usage?.tokens ?? 0)) return false;
+    if (left.channelIds.join("\0") !== right.channelIds.join("\0") || left.tagIds.join("\0") !== right.tagIds.join("\0")) return false;
+  }
+  return true;
+}
+
+function stageViewSame(current: StageSnapshot | null, next: StageSnapshot) {
+  if (!current) return false;
+  if (
+    current.activeTasks !== next.activeTasks ||
+    current.concurrency !== next.concurrency ||
+    current.jevCalls !== next.jevCalls ||
+    current.jevHits !== next.jevHits ||
+    current.jevMisses !== next.jevMisses ||
+    current.jevTokens !== next.jevTokens ||
+    current.model !== next.model ||
+    current.analysisBackend !== next.analysisBackend ||
+    current.typesafeApiKeySet !== next.typesafeApiKeySet ||
+    current.telegramStatus !== next.telegramStatus ||
+    current.messageCount !== next.messageCount ||
+    current.workers.length !== next.workers.length ||
+    current.queue.length !== next.queue.length
+  ) {
+    return false;
+  }
+  for (let i = 0; i < current.workers.length; i += 1) {
+    const left = current.workers[i];
+    const right = next.workers[i];
+    if (
+      left.workerId !== right.workerId ||
+      left.status !== right.status ||
+      left.batchId !== right.batchId ||
+      left.taskName !== right.taskName ||
+      left.messageCount !== right.messageCount
+    ) {
+      return false;
+    }
+  }
+  for (let i = 0; i < current.queue.length; i += 1) {
+    const left = current.queue[i];
+    const right = next.queue[i];
+    if (left.id !== right.id || left.status !== right.status || left.messageCount !== right.messageCount || left.taskName !== right.taskName) {
+      return false;
+    }
+  }
+  return true;
+}
 
 type HitFilter = { query: string; taskId: string; category: string; minNoul: string };
 
@@ -112,6 +191,89 @@ function categoryLabel(tags: Tag[], key?: string | null) {
   if (!key) return "other";
   if (key.toLowerCase() === "other") return "other";
   return tags.find((item) => item.key === key)?.label || key;
+}
+
+const CHIP_TONES: { color: string; background: string }[] = [
+  { color: "#a5f3fc", background: "rgba(6, 182, 212, 0.28)" },
+  { color: "#fde68a", background: "rgba(234, 179, 8, 0.28)" },
+  { color: "#ddd6fe", background: "rgba(139, 92, 246, 0.32)" },
+  { color: "#fecdd3", background: "rgba(244, 63, 94, 0.28)" },
+  { color: "#fed7aa", background: "rgba(234, 88, 12, 0.3)" },
+  { color: "#a7f3d0", background: "rgba(16, 185, 129, 0.28)" },
+  { color: "#fbcfe8", background: "rgba(219, 39, 119, 0.3)" },
+  { color: "#bfdbfe", background: "rgba(37, 99, 235, 0.32)" },
+];
+
+const TASK_TONES = ["#67e8f9", "#facc15", "#c4b5fd", "#fb7185", "#fb923c", "#34d399", "#f472b6", "#60a5fa"];
+
+const HIT_GAP = 8;
+const HIT_COL_MIN = 300;
+
+function paletteIndex(seed: string, size: number) {
+  let hash = 5381;
+  for (let i = 0; i < seed.length; i += 1) hash = Math.imul(hash, 33) ^ seed.charCodeAt(i);
+  return (hash >>> 0) % size;
+}
+
+function categoryTone(name: string): CSSProperties | undefined {
+  const label = name.trim();
+  if (!label || label.toLowerCase() === "other") return undefined;
+  const tone = CHIP_TONES[paletteIndex(label, CHIP_TONES.length)];
+  return { color: tone.color, background: tone.background };
+}
+
+function taskTone(taskId: string, taskName?: string | null) {
+  const seed = taskId.trim() || (taskName ?? "").trim();
+  if (!seed) return undefined;
+  return TASK_TONES[paletteIndex(seed, TASK_TONES.length)];
+}
+
+function hitColumnCount(width: number) {
+  if (width <= HIT_COL_MIN) return 1;
+  return Math.max(1, Math.floor((width + HIT_GAP) / (HIT_COL_MIN + HIT_GAP)));
+}
+
+function packHitBricks(root: HTMLElement) {
+  const width = root.clientWidth;
+  if (width <= 0) return;
+  const cards = Array.from(root.children).filter(
+    (node): node is HTMLElement => node instanceof HTMLElement && node.classList.contains("result-card"),
+  );
+  if (!cards.length) {
+    root.style.height = "0px";
+    return;
+  }
+  const cols = hitColumnCount(width);
+  const colWidth = (width - HIT_GAP * (cols - 1)) / cols;
+  const xs: number[] = [];
+  const ws: number[] = [];
+  let cursor = 0;
+  for (let col = 0; col < cols; col += 1) {
+    const columnWidth = col === cols - 1 ? width - cursor : Math.round(colWidth);
+    xs.push(cursor);
+    ws.push(Math.max(0, columnWidth));
+    cursor += columnWidth + HIT_GAP;
+  }
+  cards.forEach((card, index) => {
+    const col = index % cols;
+    card.style.left = `${xs[col]}px`;
+    card.style.width = `${ws[col]}px`;
+    card.style.contentVisibility = "visible";
+  });
+  const heights = new Array<number>(cols).fill(0);
+  const measured = cards.map((card) => card.offsetHeight);
+  cards.forEach((card) => {
+    card.style.contentVisibility = "";
+  });
+  cards.forEach((card, index) => {
+    const col = index % cols;
+    const y = heights[col];
+    card.style.top = `${y}px`;
+    card.style.height = `${measured[index]}px`;
+    card.style.containIntrinsicSize = `${measured[index]}px`;
+    heights[col] = y + measured[index] + HIT_GAP;
+  });
+  root.style.height = `${Math.max(0, Math.max(...heights) - HIT_GAP)}px`;
 }
 
 function minNoulValue(raw: string): number | null {
@@ -152,6 +314,60 @@ function dedupeHits(cards: HitExtract[]) {
   return items;
 }
 
+function localDayKey(date: Date) {
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${date.getFullYear()}-${month}-${day}`;
+}
+
+function hitMessageMs(hit: HitExtract) {
+  if (!hit.timestamp) return null;
+  const ms = Date.parse(hit.timestamp);
+  return Number.isFinite(ms) ? ms : null;
+}
+
+type HitDayGroup = {
+  key: string;
+  items: HitExtract[];
+};
+
+function groupHitsByMessageDay(items: HitExtract[]): HitDayGroup[] {
+  const ranked = items.map((item, index) => ({ item, index, ms: hitMessageMs(item) }));
+  ranked.sort((a, b) => {
+    if (a.ms == null && b.ms == null) return a.index - b.index;
+    if (a.ms == null) return 1;
+    if (b.ms == null) return -1;
+    if (a.ms !== b.ms) return b.ms - a.ms;
+    return a.index - b.index;
+  });
+  const groups: HitDayGroup[] = [];
+  for (const row of ranked) {
+    const key = row.ms == null ? "" : localDayKey(new Date(row.ms));
+    const last = groups[groups.length - 1];
+    if (last && last.key === key) last.items.push(row.item);
+    else groups.push({ key, items: [row.item] });
+  }
+  return groups;
+}
+
+function dayChipLabel(key: string, locale: Locale, todayLabel: string, yesterdayLabel: string, now: Date) {
+  if (!key) return null;
+  if (key === localDayKey(now)) return todayLabel;
+  const yesterday = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1);
+  if (key === localDayKey(yesterday)) return yesterdayLabel;
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(key);
+  if (!match) return null;
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const date = new Date(year, month - 1, day);
+  return date.toLocaleDateString(intlTag(locale), {
+    month: "short",
+    day: "numeric",
+    ...(year === now.getFullYear() ? {} : { year: "numeric" }),
+  });
+}
+
 export default function StagePage({ taskPanel }: { taskPanel: ReactNode }) {
   const reduceMotion = useReducedMotion();
   const resultsRef = useRef<HTMLElement | null>(null);
@@ -164,12 +380,14 @@ export default function StagePage({ taskPanel }: { taskPanel: ReactNode }) {
   const pendingHits = useRef<HitExtract[]>([]);
   const flyingCount = useRef(0);
   const landedIds = useRef(new Set<string>());
-  const ingestBuf = useRef({ n: 0, last: "", timer: 0 });
+  const ingestBuf = useRef({ n: 0, last: "", pending: 0, timer: 0 });
   const liveEpoch = useRef(0);
 
   const [stage, setStage] = useState<StageSnapshot | null>(null);
   const [tasks, setTasks] = useState<Task[]>([]);
+  const tasksRef = useRef<Task[]>([]);
   const [tags, setTags] = useState<Tag[]>([]);
+  tasksRef.current = tasks;
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [filters, setFilters] = useState<HitFilter>({ query: "", taskId: "", category: "", minNoul: "" });
@@ -197,6 +415,21 @@ export default function StagePage({ taskPanel }: { taskPanel: ReactNode }) {
   const [impact, setImpact] = useState(0);
   const [freshIds, setFreshIds] = useState<Record<string, number>>({});
   const [handoffs, setHandoffs] = useState<QueueHandoff[]>([]);
+
+  useEffect(() => {
+    if (Object.keys(freshIds).length === 0) return;
+    const timer = window.setTimeout(() => {
+      const cutoff = Date.now() - FRESH_MS;
+      setFreshIds((current) => {
+        const next: Record<string, number> = {};
+        for (const [id, at] of Object.entries(current)) {
+          if (at >= cutoff) next[id] = at;
+        }
+        return Object.keys(next).length === Object.keys(current).length ? current : next;
+      });
+    }, FRESH_MS);
+    return () => window.clearTimeout(timer);
+  }, [freshIds]);
 
   flightsRef.current = flights;
   stageRef.current = stage;
@@ -317,25 +550,33 @@ export default function StagePage({ taskPanel }: { taskPanel: ReactNode }) {
           api.tags().catch(() => ({ tags: [] as Tag[] })),
         ]);
         if (taskResp) {
-          setTasks(taskResp.tasks);
-          notifyTasksSnapshot(taskResp.tasks);
-        } else {
+          if (!sameTasks(tasksRef.current, taskResp.tasks)) {
+            tasksRef.current = taskResp.tasks;
+            setTasks(taskResp.tasks);
+            notifyTasksSnapshot(taskResp.tasks);
+          }
+        } else if (tasksRef.current.length > 0) {
+          tasksRef.current = [];
           setTasks([]);
         }
-        setTags(tagResp.tags);
+        setTags((current) => (sameTags(current, tagResp.tags) ? current : tagResp.tags));
         if (liveEpoch.current !== epoch && attempt < 2) {
           attempt += 1;
           continue;
         }
-        const raced = liveEpoch.current !== epoch;
-        setStage((current) => ({
-          ...snapshot,
-          concurrency: clampConcurrency(snapshot.concurrency ?? snapshot.workers.length ?? CONCURRENCY_DEFAULT),
-          messageCount: raced
-            ? Math.max(snapshot.messageCount ?? 0, current?.messageCount ?? 0)
-            : (snapshot.messageCount ?? 0),
-          results: [],
-        }));
+        const extra = ingestBuf.current.pending;
+        ingestBuf.current.pending = 0;
+        setStage((current) => {
+          const serverCount = snapshot.messageCount ?? 0;
+          const optimistic = (current?.messageCount ?? 0) + extra;
+          const next: StageSnapshot = {
+            ...snapshot,
+            concurrency: clampConcurrency(snapshot.concurrency ?? snapshot.workers.length ?? CONCURRENCY_DEFAULT),
+            messageCount: extra > 0 ? Math.max(serverCount, optimistic) : serverCount,
+            results: [],
+          };
+          return stageViewSame(current, next) ? current : next;
+        });
         setError(null);
         break;
       }
@@ -447,14 +688,19 @@ export default function StagePage({ taskPanel }: { taskPanel: ReactNode }) {
       }
       if (event.type === "ingest") {
         ingestBuf.current.n += 1;
+        ingestBuf.current.pending += 1;
         ingestBuf.current.last = String(payload.chatName ?? "");
-        setStage((current) =>
-          current ? { ...current, messageCount: (current.messageCount ?? 0) + 1 } : current,
-        );
         if (!ingestBuf.current.timer) {
           ingestBuf.current.timer = window.setTimeout(() => {
-            setIngest({ count: ingestBuf.current.n, last: ingestBuf.current.last });
+            const add = ingestBuf.current.pending;
+            ingestBuf.current.pending = 0;
             ingestBuf.current.timer = 0;
+            setIngest({ count: ingestBuf.current.n, last: ingestBuf.current.last });
+            if (add > 0) {
+              setStage((current) =>
+                current ? { ...current, messageCount: (current.messageCount ?? 0) + add } : current,
+              );
+            }
           }, 180);
         }
       }
@@ -594,13 +840,13 @@ export default function StagePage({ taskPanel }: { taskPanel: ReactNode }) {
     void loadHitsRef.current("more");
   }, [hitsView.items, hitsView.hasMore, hitsLoading, hitsLoadingMore]);
 
-  const onHitsScroll = () => {
+  const onHitsScroll = useCallback(() => {
     const el = hitsScrollRef.current;
     if (!el) return;
     if (el.scrollHeight - el.scrollTop - el.clientHeight > HITS_SCROLL_EDGE) return;
     hitsMoreFailedRef.current = false;
     void loadHitsRef.current("more");
-  };
+  }, []);
 
   const categories = useMemo(() => {
     const map = new Map<string, string>();
@@ -647,7 +893,7 @@ export default function StagePage({ taskPanel }: { taskPanel: ReactNode }) {
   const packing = jobs.some((item) => item.status === "packing");
   const aiMode = judging ? "is-judging" : packing ? "is-packing" : jobs.some((item) => item.status === "error") ? "is-error" : "is-idle";
   const storedMessages = stage?.messageCount ?? 0;
-  const { m } = useI18n();
+  const { m, locale } = useI18n();
   const engineLaya = stage?.analysisBackend === "laya";
   const engineLabel = engineLaya ? m.stage.engineLaya : m.stage.engineJev;
   const batchError = lastErrorBatch === BATCH_FAIL ? m.stage.batchFail : lastErrorBatch;
@@ -847,42 +1093,16 @@ export default function StagePage({ taskPanel }: { taskPanel: ReactNode }) {
               onChange={(event) => setFilters((current) => ({ ...current, minNoul: event.target.value }))}
             />
           </div>
-          <div ref={hitsScrollRef} className="column-scroll hit-grid" onScroll={onHitsScroll}>
-            <AnimatePresence initial={false}>
-              {hitsView.items.length === 0 ? (
-                hitsLoading ? (
-                  <p key="hits-loading" className="hit-more" role="status">
-                    {m.stage.loading}
-                  </p>
-                ) : (
-                  <motion.p
-                    key="empty-well"
-                    className="hit-empty px-2 py-6 text-center text-[13px] leading-relaxed text-slate-500"
-                    initial={reduceMotion ? false : { opacity: 0 }}
-                    animate={{ opacity: 1 }}
-                  >
-                    {m.stage.emptyHits}
-                  </motion.p>
-                )
-              ) : (
-                hitsView.items.map((item) => (
-                  <motion.div
-                    key={item.id}
-                    initial={reduceMotion ? false : { opacity: 0, y: -4 }}
-                    animate={{ opacity: 1, y: 0 }}
-                    transition={SNAP}
-                  >
-                    <ResultCard hit={item} fresh={Boolean(freshIds[item.id])} categoryText={categoryLabel(tags, item.category)} />
-                  </motion.div>
-                ))
-              )}
-            </AnimatePresence>
-            {hitsLoadingMore ? (
-              <p className="hit-more" role="status">
-                {m.stage.loadingMore}
-              </p>
-            ) : null}
-          </div>
+          <HitsPane
+            items={hitsView.items}
+            loading={hitsLoading}
+            loadingMore={hitsLoadingMore}
+            freshIds={freshIds}
+            tags={tags}
+            locale={locale}
+            scrollRef={hitsScrollRef}
+            onScroll={onHitsScroll}
+          />
         </aside>
       </div>
 
@@ -891,7 +1111,7 @@ export default function StagePage({ taskPanel }: { taskPanel: ReactNode }) {
           <motion.div
             key={item.id}
             className="queue-card queue-handoff"
-            style={{ width: item.width, willChange: "transform, opacity" }}
+            style={{ width: item.width }}
             initial={{ x: item.x, y: item.y, opacity: 1 }}
             animate={{ x: item.x + item.dx, y: item.y + item.dy, opacity: 0 }}
             transition={HANDOFF}
@@ -906,7 +1126,6 @@ export default function StagePage({ taskPanel }: { taskPanel: ReactNode }) {
             <motion.div
               key={`hit-${flight.id}`}
               className="hit-packet pointer-events-none fixed top-0 left-0 z-50 w-52 rounded-lg border border-lime/40 bg-raised/95 p-2.5"
-              style={{ willChange: "transform, opacity" }}
               initial={{ x: flight.from.left + flight.from.width / 2 - 104, y: flight.from.top, opacity: 1, scale: 0.96 }}
               animate={{
                 x: (flight.to?.left ?? flight.from.left) + 12,
@@ -950,7 +1169,7 @@ function MissBurst({ flight, onDone }: { flight: Flight; onDone: () => void }) {
   return (
     <motion.div
       className="pointer-events-none fixed z-40 w-52 rounded-lg border border-rose/30 bg-raised/90 p-2.5"
-      style={{ top: 0, left: 0, willChange: "transform, opacity" }}
+      style={{ top: 0, left: 0 }}
       initial={{ x: flight.from.left + flight.from.width / 2 - 104, y: flight.from.top, opacity: 1, scale: 1 }}
       animate={{ opacity: 0, y: flight.from.top + 6, scale: 0.98 }}
       transition={MISS_FADE}
@@ -994,6 +1213,7 @@ const AiPresence = memo(function AiPresence({
           aria-live="polite"
           aria-label={m.stage.aiAria(engineLabel, status, busy, concurrency)}
         >
+          <span className="ai-core-glow" aria-hidden="true" />
           <span className="ai-core-ring" aria-hidden="true" />
           <span className="ai-core-pupil" aria-hidden="true" />
         </div>
@@ -1011,44 +1231,302 @@ const AiPresence = memo(function AiPresence({
   );
 });
 
+type HitPreview = {
+  urls: string[];
+  index: number;
+  label: string;
+};
+
+function HitLightbox({
+  preview,
+  onClose,
+  onIndex,
+}: {
+  preview: HitPreview;
+  onClose: () => void;
+  onIndex: (index: number) => void;
+}) {
+  const { m } = useI18n();
+  const rootRef = useRef<HTMLDivElement>(null);
+  const closeRef = useRef<HTMLButtonElement>(null);
+  const onCloseRef = useRef(onClose);
+  const onIndexRef = useRef(onIndex);
+  onCloseRef.current = onClose;
+  onIndexRef.current = onIndex;
+  const count = preview.urls.length;
+  const index = count ? Math.min(Math.max(preview.index, 0), count - 1) : 0;
+  const multiple = count > 1;
+  const indexRef = useRef(index);
+  const countRef = useRef(count);
+  indexRef.current = index;
+  countRef.current = count;
+
+  useEffect(() => {
+    closeRef.current?.focus({ preventScroll: true });
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        event.stopPropagation();
+        onCloseRef.current();
+        return;
+      }
+      if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
+        const total = countRef.current;
+        if (total < 2) return;
+        event.preventDefault();
+        const next = event.key === "ArrowLeft" ? indexRef.current - 1 : indexRef.current + 1;
+        if (next >= 0 && next < total) onIndexRef.current(next);
+        return;
+      }
+      if (event.key !== "Tab") return;
+      const root = rootRef.current;
+      if (!root) return;
+      const items = Array.from(root.querySelectorAll<HTMLElement>("button:not([disabled])"));
+      if (!items.length) return;
+      const first = items[0];
+      const last = items[items.length - 1];
+      const active = document.activeElement;
+      const inside = active instanceof Node && root.contains(active);
+      if (event.shiftKey) {
+        if (active === first || !inside) {
+          event.preventDefault();
+          last.focus();
+        }
+      } else if (active === last || !inside) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, []);
+
+  useEffect(() => {
+    const root = rootRef.current;
+    const active = document.activeElement;
+    if (!(active instanceof HTMLButtonElement) || !root?.contains(active) || !active.disabled) return;
+    closeRef.current?.focus({ preventScroll: true });
+  }, [index]);
+
+  const src = preview.urls[index];
+  if (!src) return null;
+
+  return createPortal(
+    <div
+      ref={rootRef}
+      className="hit-lightbox"
+      role="dialog"
+      aria-modal="true"
+      aria-label={m.stage.imageViewer}
+      onClick={(event) => {
+        if (event.target === event.currentTarget) onCloseRef.current();
+      }}
+    >
+      {multiple ? (
+        <button
+          type="button"
+          className="dialog-close hit-lightbox-nav is-prev"
+          onClick={() => onIndex(index - 1)}
+          disabled={index <= 0}
+        >
+          {m.stage.prevImage}
+        </button>
+      ) : null}
+      <img className="hit-lightbox-img" src={src} alt={preview.label} />
+      {multiple ? (
+        <button
+          type="button"
+          className="dialog-close hit-lightbox-nav is-next"
+          onClick={() => onIndex(index + 1)}
+          disabled={index >= count - 1}
+        >
+          {m.stage.nextImage}
+        </button>
+      ) : null}
+      <button ref={closeRef} type="button" className="dialog-close hit-lightbox-close" onClick={() => onCloseRef.current()}>
+        {m.close}
+      </button>
+    </div>,
+    document.body,
+  );
+}
+
 const ResultCard = memo(function ResultCard({
   hit,
   fresh,
   categoryText,
+  locale,
+  onOpenImage,
 }: {
   hit: HitExtract;
   fresh: boolean;
   categoryText: string;
+  locale: Locale;
+  onOpenImage: (urls: string[], index: number, label: string, trigger: HTMLElement) => void;
 }) {
-  const { m } = useI18n();
+  const m = messages[locale];
   const images = hit.images ?? [];
   const sender = hit.senderName || m.stage.unknownSender;
+  const title = hit.taskName || m.stage.taskFallback;
+  const titleColor = taskTone(hit.taskId, hit.taskName);
   return (
     <article className={`result-card${fresh ? " is-fresh" : ""}`}>
       {images.length ? (
         <div className="hit-media">
           {images.map((image, index) => (
-            <img key={`${hit.id}-${index}`} src={`data:${image.mime};base64,${image.base64}`} alt="" />
+            <button
+              key={`${hit.id}-${index}`}
+              type="button"
+              className="hit-media-btn"
+              aria-label={m.stage.enlargeImage}
+              onClick={(event) => onOpenImage(images.map((item) => stableImageUrl(item)), index, title, event.currentTarget)}
+            >
+              <img src={stableImageUrl(image)} alt="" width={320} height={160} decoding="async" loading="lazy" />
+            </button>
           ))}
         </div>
       ) : null}
       <div className="hit-body">
-        <div className="flex items-center justify-between gap-2">
-          <p className="min-w-0 truncate text-[13px] font-medium">{hit.taskName || m.stage.taskFallback}</p>
-          <span className="hit-cat">{categoryText}</span>
+        <div className="hit-head">
+          <p className="hit-title" style={titleColor ? { color: titleColor } : undefined} title={title}>
+            {title}
+          </p>
+          <span className="hit-cat" style={categoryTone(categoryText)} title={categoryText}>
+            {categoryText}
+          </span>
         </div>
         <p className="hit-meta">
           <span>{sender}</span>
-          <span>{formatWhen(hit.timestamp, false)}</span>
-          <span className="font-mono text-cyan">noul {pct(hit.noul)}</span>
-          <span>
-            {m.stage.thisBatch(hit.hitCount ?? "—", hit.messageCount ?? "—")}
-          </span>
+          <span className="hit-quiet">{formatWhen(hit.timestamp, false)}</span>
+          <span className="hit-noul font-mono text-cyan">noul {pct(hit.noul)}</span>
+          <span className="hit-quiet">{m.stage.thisBatch(hit.hitCount ?? "—", hit.messageCount ?? "—")}</span>
         </p>
         {hit.chatName ? <p className="hit-chat">{hit.chatName}</p> : null}
         <p className="hit-text">{hit.content || m.stage.noText}</p>
       </div>
     </article>
+  );
+});
+
+const HitsPane = memo(function HitsPane({
+  items,
+  loading,
+  loadingMore,
+  freshIds,
+  tags,
+  locale,
+  scrollRef,
+  onScroll,
+}: {
+  items: HitExtract[];
+  loading: boolean;
+  loadingMore: boolean;
+  freshIds: Record<string, number>;
+  tags: Tag[];
+  locale: Locale;
+  scrollRef: MutableRefObject<HTMLDivElement | null>;
+  onScroll: () => void;
+}) {
+  const m = messages[locale];
+  const groups = useMemo(() => groupHitsByMessageDay(items), [items]);
+  const [dayClock, setDayClock] = useState(() => Date.now());
+  const previewTrigger = useRef<HTMLElement | null>(null);
+  const [preview, setPreview] = useState<HitPreview | null>(null);
+  const openHitImage = useCallback((urls: string[], index: number, label: string, trigger: HTMLElement) => {
+    if (!urls.length) return;
+    previewTrigger.current = trigger;
+    setPreview({ urls, index, label });
+  }, []);
+  const closeHitImage = useCallback(() => {
+    const trigger = previewTrigger.current;
+    previewTrigger.current = null;
+    setPreview(null);
+    requestAnimationFrame(() => {
+      if (trigger?.isConnected) trigger.focus({ preventScroll: true });
+    });
+  }, []);
+  const moveHitImage = useCallback((index: number) => {
+    setPreview((current) => (current ? { ...current, index } : current));
+  }, []);
+  useEffect(() => {
+    const current = new Date(dayClock);
+    const nextMidnight = new Date(current.getFullYear(), current.getMonth(), current.getDate() + 1, 0, 0, 1);
+    const timer = window.setTimeout(() => setDayClock(Date.now()), Math.max(1000, nextMidnight.getTime() - Date.now()));
+    return () => window.clearTimeout(timer);
+  }, [dayClock]);
+  useLayoutEffect(() => {
+    const host = scrollRef.current;
+    if (!host) return;
+    let lastWidth = -1;
+    const pack = () => {
+      host.querySelectorAll<HTMLElement>(".hit-grid").forEach((grid) => packHitBricks(grid));
+      lastWidth = host.clientWidth;
+    };
+    pack();
+    const observer = new ResizeObserver(() => {
+      if (Math.abs(host.clientWidth - lastWidth) < 1) return;
+      pack();
+    });
+    observer.observe(host);
+    let cancelFonts = false;
+    const fonts = document.fonts;
+    void fonts.ready.then(() => {
+      if (cancelFonts || scrollRef.current !== host) return;
+      pack();
+    });
+    return () => {
+      cancelFonts = true;
+      observer.disconnect();
+    };
+  }, [items, locale, scrollRef]);
+  const now = new Date(dayClock);
+  return (
+    <>
+      <div ref={scrollRef} className="column-scroll hits-scroll" onScroll={onScroll}>
+        {items.length === 0 ? (
+          loading ? (
+            <p className="hit-more" role="status">
+              {m.stage.loading}
+            </p>
+          ) : (
+            <p className="hit-empty px-2 py-6 text-center text-[13px] leading-relaxed text-slate-500">{m.stage.emptyHits}</p>
+          )
+        ) : (
+          <div className="hit-days">
+            {groups.map((group) => {
+              const label = dayChipLabel(group.key, locale, m.stage.dayToday, m.stage.dayYesterday, now);
+              return (
+                <section key={group.key || "undated"} className="hit-day">
+                  {label ? (
+                    <p className="hit-day-chip">
+                      <span>{label}</span>
+                    </p>
+                  ) : null}
+                  <div className="hit-grid">
+                    {group.items.map((item) => (
+                      <ResultCard
+                        key={item.id}
+                        hit={item}
+                        fresh={freshIds[item.id] != null}
+                        categoryText={categoryLabel(tags, item.category)}
+                        locale={locale}
+                        onOpenImage={openHitImage}
+                      />
+                    ))}
+                  </div>
+                </section>
+              );
+            })}
+          </div>
+        )}
+        {loadingMore ? (
+          <p className="hit-more" role="status">
+            {m.stage.loadingMore}
+          </p>
+        ) : null}
+      </div>
+      {preview ? <HitLightbox preview={preview} onClose={closeHitImage} onIndex={moveHitImage} /> : null}
+    </>
   );
 });
 

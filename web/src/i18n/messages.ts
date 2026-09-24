@@ -90,7 +90,13 @@ export type Messages = {
     noText: string;
     unknownSender: string;
     taskFallback: string;
+    enlargeImage: string;
+    imageViewer: string;
+    prevImage: string;
+    nextImage: string;
     thisBatch: (hits: number | string, total: number | string) => string;
+    dayToday: string;
+    dayYesterday: string;
     workerStatus: Record<"idle" | "packing" | "judging" | "done" | "error", string>;
   };
   tasks: {
@@ -367,7 +373,13 @@ const zhHant: Messages = {
     noText: "（無文字）",
     unknownSender: "未知傳送者",
     taskFallback: "任務",
+    enlargeImage: "放大圖片",
+    imageViewer: "圖片",
+    prevImage: "上一張",
+    nextImage: "下一張",
     thisBatch: (hits, total) => `本批 ${hits}/${total}`,
+    dayToday: "今日",
+    dayYesterday: "昨日",
     workerStatus: { idle: "閒置", packing: "打包中", judging: "判斷中", done: "完成", error: "重試中" },
   },
   tasks: {
@@ -652,7 +664,13 @@ const zhHans: Messages = {
     noText: "（无文字）",
     unknownSender: "未知发送者",
     taskFallback: "任务",
+    enlargeImage: "放大图片",
+    imageViewer: "图片",
+    prevImage: "上一张",
+    nextImage: "下一张",
     thisBatch: (hits, total) => `本批 ${hits}/${total}`,
+    dayToday: "今天",
+    dayYesterday: "昨天",
     workerStatus: { idle: "闲置", packing: "打包中", judging: "判断中", done: "完成", error: "重试中" },
   },
   tasks: {
@@ -937,7 +955,13 @@ const en: Messages = {
     noText: "(no text)",
     unknownSender: "Unknown sender",
     taskFallback: "Task",
+    enlargeImage: "Enlarge image",
+    imageViewer: "Image",
+    prevImage: "Previous image",
+    nextImage: "Next image",
     thisBatch: (hits, total) => `Batch ${hits}/${total}`,
+    dayToday: "Today",
+    dayYesterday: "Yesterday",
     workerStatus: { idle: "Idle", packing: "Packing", judging: "Judging", done: "Done", error: "Retrying" },
   },
   tasks: {

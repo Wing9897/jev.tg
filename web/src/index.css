@@ -482,7 +482,7 @@ input[type="checkbox"]:disabled {
   flex-direction: column;
   border-radius: 12px;
   border: 1px solid var(--color-line);
-  background: rgba(14, 22, 36, 0.94);
+  background: #0e1624;
   overflow: hidden;
 }
 
@@ -516,6 +516,7 @@ input[type="checkbox"]:disabled {
   overflow: auto;
   overscroll-behavior: contain;
   padding: 2px 8px 8px;
+  background: #0e1624;
 }
 
 .count-badge {
@@ -618,14 +619,21 @@ input[type="checkbox"]:disabled {
   background: radial-gradient(circle at 42% 36%, rgba(34, 211, 238, 0.34), rgba(7, 11, 18, 0.94) 62%);
 }
 
+.ai-core-glow {
+  position: absolute;
+  inset: 30%;
+  border-radius: 999px;
+  pointer-events: none;
+  box-shadow: 0 0 calc(10px + var(--ai-load) * 8px) rgba(34, 211, 238, 0.55);
+}
+
 .ai-core-ring {
   position: absolute;
   inset: 8px;
   border-radius: 999px;
   border: 1px solid rgba(34, 211, 238, 0.16);
   border-top-color: rgba(34, 211, 238, 0.7);
-  animation: orbit calc(3.2s - var(--ai-load) * 1.8s) linear infinite;
-  will-change: transform;
+  animation: orbit 2.6s linear infinite;
 }
 
 .ai-core-pupil {
@@ -633,26 +641,32 @@ input[type="checkbox"]:disabled {
   inset: 34%;
   border-radius: 999px;
   background: #22d3ee;
-  box-shadow: 0 0 calc(8px + var(--ai-load) * 14px) rgba(34, 211, 238, 0.7);
-  animation: core-pulse calc(2.2s - var(--ai-load) * 0.9s) ease-in-out infinite;
-  will-change: transform, opacity;
+  animation: core-pulse 1.8s ease-in-out infinite;
 }
 
 .ai-presence.is-judging .ai-core {
   border-color: rgba(192, 132, 252, 0.5);
 }
 
+.ai-presence.is-judging .ai-core-glow {
+  box-shadow: 0 0 14px rgba(192, 132, 252, 0.6);
+}
+
 .ai-presence.is-judging .ai-core-pupil {
   background: #c084fc;
-  box-shadow: 0 0 calc(8px + var(--ai-load) * 16px) rgba(192, 132, 252, 0.75);
   animation-name: core-pulse-judging;
-  animation-duration: calc(1.15s - var(--ai-load) * 0.35s);
+  animation-duration: 1.05s;
+}
+
+.ai-presence.is-idle .ai-core-glow,
+.ai-presence.is-idle .ai-core-ring,
+.ai-presence.is-idle .ai-core-pupil {
+  opacity: 0.72;
 }
 
 .ai-presence.is-idle .ai-core-ring,
 .ai-presence.is-idle .ai-core-pupil {
   animation-duration: 6.2s;
-  opacity: 0.72;
 }
 
 .ai-core-caption {
@@ -676,7 +690,6 @@ input[type="checkbox"]:disabled {
   transform: scaleX(0);
   transform-origin: left center;
   transition: transform 0.16s ease-out;
-  will-change: transform;
 }
 
 .ai-presence.is-judging .ai-meter-fill {
@@ -697,7 +710,7 @@ input[type="checkbox"]:disabled {
 .queue-card {
   border-radius: 12px;
   border: 1px solid var(--color-line);
-  background: rgba(7, 11, 18, 0.55);
+  background: #121a28;
   padding: 10px 12px;
 }
 
@@ -752,14 +765,18 @@ input[type="checkbox"]:disabled {
 
 .result-card {
   position: relative;
+  min-width: 0;
+  max-width: 100%;
   border-radius: 10px;
   border: 1px solid rgba(163, 230, 53, 0.22);
-  background: rgba(7, 11, 18, 0.78);
+  background: #121a28;
   padding: 0;
-  overflow: hidden;
-  transition:
-    border-color 0.2s ease,
-    box-shadow 0.2s ease;
+  overflow-x: hidden;
+  overflow-y: hidden;
+  overflow-anchor: none;
+  content-visibility: auto;
+  contain-intrinsic-size: auto 280px;
+  transition: border-color 0.2s ease;
 }
 
 .result-card:hover,
@@ -775,19 +792,73 @@ input[type="checkbox"]:disabled {
   pointer-events: none;
   box-shadow: inset 0 0 0 1px rgba(163, 230, 53, 0.7);
   animation: fresh-glow 0.4s ease-out forwards;
-  will-change: opacity;
+}
+
+.column-scroll.hits-scroll {
+  min-width: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  scrollbar-gutter: stable;
+}
+
+.hit-days {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  width: 100%;
+  min-width: 0;
+  overflow-x: clip;
+  overflow-anchor: none;
+}
+
+.hit-day {
+  width: 100%;
+  min-width: 0;
+  margin: 0;
+  overflow-x: clip;
+}
+
+.hit-day-chip {
+  display: flex;
+  justify-content: center;
+  min-width: 0;
+  margin: 0 0 8px;
+}
+
+.hit-day-chip span {
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  border-radius: 999px;
+  padding: 2px 10px;
+  background: rgba(148, 163, 184, 0.14);
+  color: #94a3b8;
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.45;
 }
 
 .hit-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(min(100%, 300px), 1fr));
-  gap: 8px;
-  align-items: start;
+  position: relative;
+  width: 100%;
+  min-width: 0;
+  overflow-x: clip;
+  overflow-anchor: none;
+}
+
+.hit-grid > .result-card {
+  position: absolute;
+  top: 0;
+  left: 0;
+  margin: 0;
 }
 
 .hit-empty,
 .hit-more {
-  grid-column: 1 / -1;
+  min-width: 0;
+  max-width: 100%;
 }
 
 .hit-more {
@@ -804,73 +875,205 @@ input[type="checkbox"]:disabled {
   flex-direction: column;
   gap: 2px;
   background: #070b12;
+  border-bottom: 1px solid rgba(226, 232, 240, 0.12);
+}
+
+.hit-media-btn {
+  display: block;
+  width: 100%;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  appearance: none;
+  background: #070b12;
+  color: inherit;
+  line-height: 0;
+  cursor: zoom-in;
+}
+
+.hit-media-btn:focus-visible {
+  outline: 1px solid rgba(103, 232, 249, 0.85);
+  outline-offset: -2px;
 }
 
 .hit-media img {
   display: block;
   width: 100%;
-  height: auto;
-  max-height: 320px;
+  height: 160px;
+  aspect-ratio: 2 / 1;
   object-fit: contain;
   object-position: center;
   background: #070b12;
 }
 
 .hit-body {
-  padding: 8px 10px 10px;
+  min-width: 0;
+  overflow-x: hidden;
+  overflow-wrap: anywhere;
+  padding: 12px 14px 14px;
+}
+
+.hit-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+  padding-bottom: 8px;
+  margin-bottom: 8px;
+  border-bottom: 1px solid rgba(226, 232, 240, 0.12);
+}
+
+.hit-title {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 100%;
+  margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  border: 1px solid currentColor;
+  border-radius: 6px;
+  padding: 0 7px;
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.35;
+  color: #e2e8f0;
+}
+
+.hit-noul {
+  font-size: 10px;
+  line-height: 1.3;
 }
 
 .hit-meta {
   display: flex;
   flex-wrap: wrap;
   gap: 4px 10px;
-  margin: 4px 0 0;
+  min-width: 0;
+  margin: 0;
+  overflow-x: hidden;
   font-size: 12px;
   line-height: 1.4;
   color: #94a3b8;
 }
 
-.hit-chat {
-  margin: 2px 0 0;
-  font-size: 12px;
-  line-height: 1.4;
+.hit-quiet {
   color: #64748b;
 }
 
+.hit-meta span {
+  min-width: 0;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+}
+
+.hit-chat {
+  margin: 2px 0 0;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-size: 12px;
+  line-height: 1.4;
+  color: #475569;
+}
+
 .hit-cat {
-  flex: 0 0 auto;
+  flex: 0 1 auto;
+  max-width: 46%;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   border-radius: 999px;
   padding: 1px 7px;
   font-size: 12px;
   line-height: 1.4;
-  color: #a3e635;
-  background: rgba(163, 230, 53, 0.12);
+  color: #94a3b8;
+  background: rgba(148, 163, 184, 0.16);
 }
 
 .hit-text {
-  margin: 6px 0 0;
+  margin: 8px 0 0;
   max-height: 9.5rem;
-  overflow: auto;
+  min-width: 0;
+  max-width: 100%;
+  overflow-x: hidden;
+  overflow-y: auto;
   overscroll-behavior: contain;
+  overflow-wrap: anywhere;
   white-space: pre-wrap;
-  font-size: 13px;
-  line-height: 1.5;
+  font-size: 14.5px;
+  line-height: 1.7;
   color: #e2e8f0;
 }
 
 .hit-packet {
-  will-change: transform, opacity;
-  box-shadow: 0 10px 24px rgba(0, 0, 0, 0.35);
+  background: #152033;
+}
+
+.hit-lightbox {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 56px 64px;
+  overflow: hidden;
+  background: rgba(7, 11, 18, 0.86);
+}
+
+.hit-lightbox-img {
+  display: block;
+  width: auto;
+  height: auto;
+  min-width: 0;
+  min-height: 0;
+  max-width: min(100%, calc(100vw - 48px));
+  max-height: min(100%, calc(100dvh - 96px));
+  object-fit: contain;
+  background: #070b12;
+}
+
+.hit-lightbox-close {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  z-index: 1;
+}
+
+.hit-lightbox-nav {
+  position: absolute;
+  top: 50%;
+  z-index: 1;
+  transform: translateY(-50%);
+}
+
+.hit-lightbox-nav.is-prev {
+  left: 12px;
+}
+
+.hit-lightbox-nav.is-next {
+  right: 12px;
+}
+
+.hit-lightbox-nav:disabled,
+.hit-lightbox-nav:disabled:hover {
+  opacity: 0.35;
+  color: #64748b;
+  background: transparent;
+  cursor: default;
 }
 
 .holo-toast {
   pointer-events: auto;
   border-radius: 12px;
   border: 1px solid rgba(34, 211, 238, 0.22);
-  background: rgba(7, 11, 18, 0.72);
+  background: #121a28;
   padding: 8px 12px;
   font-size: 13px;
-  backdrop-filter: blur(10px);
 }
 
 .toast-stack {
@@ -901,7 +1104,6 @@ input[type="checkbox"]:disabled {
   pointer-events: none;
   box-shadow: inset 0 0 0 2px rgba(34, 211, 238, 0.9);
   animation: panel-flash 0.48s ease-out forwards;
-  will-change: opacity;
 }
 
 .module-card {
@@ -914,7 +1116,7 @@ input[type="checkbox"]:disabled {
   overflow: hidden;
   border-radius: 12px;
   border: 1px solid var(--color-line);
-  background: rgba(14, 22, 36, 0.94);
+  background: #0e1624;
   padding: 8px 10px 8px;
 }
 
@@ -926,7 +1128,7 @@ input[type="checkbox"]:disabled {
   position: sticky;
   top: 0;
   z-index: 1;
-  background: rgba(14, 22, 36, 0.96);
+  background: #0e1624;
 }
 
 .module-card > :not(.dense-list) {
@@ -982,7 +1184,9 @@ input[type="checkbox"]:disabled {
   padding: 5px 7px;
   border-radius: 8px;
   border: 1px solid var(--color-line);
-  background: rgba(7, 11, 18, 0.4);
+  background: #121a28;
+  content-visibility: auto;
+  contain-intrinsic-size: auto 72px;
 }
 
 .dense-row.is-off .task-card-title,
@@ -1199,9 +1403,8 @@ input[type="checkbox"]:disabled {
   padding: 20px;
   overflow: hidden;
   overscroll-behavior: none;
-  background: rgba(3, 6, 11, 0.97);
+  background: #070b12;
   animation: dialog-in 0.18s ease-out both;
-  will-change: opacity;
 }
 
 .dialog-backdrop.is-closing {
@@ -1225,7 +1428,6 @@ input[type="checkbox"]:disabled {
   line-height: 1.45;
   color: #e2e8f0;
   animation: dialog-panel-in 0.18s ease-out both;
-  will-change: transform, opacity;
 }
 
 .dialog-backdrop.is-closing .dialog-panel {
@@ -2013,6 +2215,7 @@ select.field-input {
 }
 
 @media (prefers-reduced-motion: reduce) {
+  .ai-core-glow,
   .ai-core-ring,
   .ai-core-pupil,
   .ai-meter-fill,
