@@ -85,7 +85,6 @@ export type Messages = {
     minNoul: string;
     emptyHits: string;
     loadingMore: string;
-    hit: string;
     miss: string;
     noText: string;
     unknownSender: string;
@@ -97,6 +96,7 @@ export type Messages = {
     thisBatch: (hits: number | string, total: number | string) => string;
     dayToday: string;
     dayYesterday: string;
+    hitNew: string;
     workerStatus: Record<"idle" | "packing" | "judging" | "done" | "error", string>;
   };
   tasks: {
@@ -368,7 +368,6 @@ const zhHant: Messages = {
     minNoul: "最低 noul",
     emptyHits: "尚無命中訊息。未達門檻的內容不會出現在這裡。",
     loadingMore: "正在載入較早的命中…",
-    hit: "命中",
     miss: "未命中",
     noText: "（無文字）",
     unknownSender: "未知傳送者",
@@ -380,6 +379,7 @@ const zhHant: Messages = {
     thisBatch: (hits, total) => `本批 ${hits}/${total}`,
     dayToday: "今日",
     dayYesterday: "昨日",
+    hitNew: "新",
     workerStatus: { idle: "閒置", packing: "打包中", judging: "判斷中", done: "完成", error: "重試中" },
   },
   tasks: {
@@ -659,7 +659,6 @@ const zhHans: Messages = {
     minNoul: "最低 noul",
     emptyHits: "尚无命中消息。未达门槛的内容不会出现在这里。",
     loadingMore: "正在加载较早的命中…",
-    hit: "命中",
     miss: "未命中",
     noText: "（无文字）",
     unknownSender: "未知发送者",
@@ -671,6 +670,7 @@ const zhHans: Messages = {
     thisBatch: (hits, total) => `本批 ${hits}/${total}`,
     dayToday: "今天",
     dayYesterday: "昨天",
+    hitNew: "新",
     workerStatus: { idle: "闲置", packing: "打包中", judging: "判断中", done: "完成", error: "重试中" },
   },
   tasks: {
@@ -950,7 +950,6 @@ const en: Messages = {
     minNoul: "Minimum noul",
     emptyHits: "No hits yet. Messages under the threshold do not appear here.",
     loadingMore: "Loading earlier hits…",
-    hit: "Hit",
     miss: "Miss",
     noText: "(no text)",
     unknownSender: "Unknown sender",
@@ -962,6 +961,7 @@ const en: Messages = {
     thisBatch: (hits, total) => `Batch ${hits}/${total}`,
     dayToday: "Today",
     dayYesterday: "Yesterday",
+    hitNew: "New",
     workerStatus: { idle: "Idle", packing: "Packing", judging: "Judging", done: "Done", error: "Retrying" },
   },
   tasks: {

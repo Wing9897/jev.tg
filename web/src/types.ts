@@ -15,7 +15,6 @@ export interface Tag {
   key: string;
   label: string;
   description: string;
-  createdAt: string;
   updatedAt: string;
 }
 
@@ -30,7 +29,6 @@ export interface Task {
   channelIds: string[];
   enabled: boolean;
   priority: number;
-  createdAt: string;
   updatedAt: string;
   pool: { total: number; analyzed: number };
   usage?: TaskUsage;
@@ -38,8 +36,6 @@ export interface Task {
 
 interface TaskUsage {
   calls: number;
-  inputTokens: number;
-  outputTokens: number;
   tokens: number;
   spendUsd: number;
   usdKind: UsdKind;
@@ -56,10 +52,8 @@ export interface HitExtract {
   messageId: string;
   taskId: string;
   taskName?: string | null;
-  status: "hit";
   noul?: number | null;
   category?: string | null;
-  categoryConfidence?: number | null;
   chatName?: string | null;
   senderName?: string | null;
   content?: string | null;
@@ -68,29 +62,16 @@ export interface HitExtract {
   images?: HitImage[];
   hitCount?: number | null;
   messageCount?: number | null;
-  createdAt?: string;
   updatedAt?: string;
   completedAt?: string | null;
 }
 
 export interface BatchResult {
   id: string;
-  taskId: string;
   taskName?: string | null;
   status: "queued" | "running" | "hit" | "miss" | "error";
   messageCount: number;
-  hitCount?: number | null;
-  noul?: number | null;
-  confidence?: number | null;
-  category?: string | null;
-  categoryConfidence?: number | null;
   errorMessage?: string | null;
-  timeStart?: string | null;
-  timeEnd?: string | null;
-  workerId?: number | null;
-  createdAt: string;
-  updatedAt: string;
-  completedAt?: string | null;
 }
 
 export interface Channel {
@@ -100,15 +81,12 @@ export interface Channel {
 }
 
 export interface TelegramStatus {
-  id: string;
   name: string;
   status: TelegramStep;
   phone?: string | null;
   apiId?: number | null;
   hasApiHash: boolean;
   lastError?: string | null;
-  lastConnectedAt?: string | null;
-  sessionFile: string;
 }
 
 export interface Settings {
@@ -126,23 +104,14 @@ export interface Settings {
   analysisMaxAgeDays: number;
   analysisBackend: "jev" | "laya";
   analysisPaused: boolean;
-  lastCreditsRemaining?: number | null;
-  lastCreditsAt?: string | null;
-  updatedAt: string;
 }
 
 export type UsdKind = "none" | "actual" | "estimate" | "mixed";
 
 interface BillingWindow {
   calls: number;
-  successCalls: number;
-  errorCalls: number;
-  inputTokens: number;
-  outputTokens: number;
   tokens: number;
   usd: number;
-  usdActual: number;
-  usdEstimated: number;
   usdKind: UsdKind;
 }
 
@@ -154,20 +123,12 @@ export interface BillingSummary {
   lastCreditsAt: string | null;
   insufficientCredits: boolean;
   lowBalance: boolean;
-  lastInsufficientAt: string | null;
   lastInsufficientMessage: string | null;
   analysisBackend: "jev" | "laya";
-  rates: {
-    inputUsdPerMtok: number;
-    outputUsdPerMtok: number;
-    note: string;
-  };
   hud: {
     todayUsd: number;
     todayUsdKind: UsdKind;
     todayTokens: number;
-    allTimeUsd: number;
-    allTimeUsdKind: UsdKind;
     lastCreditsRemaining: number | null;
     insufficientCredits: boolean;
     lowBalance: boolean;
@@ -177,20 +138,14 @@ export interface BillingSummary {
 export interface BillingUsageRow {
   id: string;
   createdAt: string;
-  taskId?: string | null;
-  batchId?: string | null;
   model?: string | null;
   backend?: string | null;
   inputTokens?: number | null;
   outputTokens?: number | null;
-  tokens?: number | null;
-  costUsd?: number | null;
-  estimatedCostUsd?: number | null;
   spendUsd?: number | null;
   usdKind: UsdKind;
   success: boolean;
   errorCode?: string | null;
-  errorMessage?: string | null;
   creditsRemaining?: number | null;
 }
 
@@ -224,7 +179,6 @@ export interface StageSnapshot {
   typesafeApiKeySet: boolean;
   telegramStatus: TelegramStep;
   messageCount: number;
-  recentBatchError?: BatchResult | null;
 }
 
 export interface LoginNext {

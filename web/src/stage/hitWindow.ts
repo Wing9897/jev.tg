@@ -1,15 +1,20 @@
 import type { HitExtract } from "../types";
 
 export const HITS_PAGE_SIZE = 40;
-export const HITS_SCROLL_EDGE = 280;
 export const HITS_IDLE_MS = 1500;
 export const HITS_KEEP_MAX = 120;
 export const HITS_KEEP_PAD = 40;
 export const HITS_RELEASE_MIN = 16;
 export const HITS_AT_TOP_PX = 48;
 
+/** Start the next page while about one column viewport of mounted hits remains. Short columns still prefetch by 640px. */
+export function hitsPrefetchEdge(clientHeight: number) {
+  const view = Number.isFinite(clientHeight) ? Math.max(0, clientHeight) : 0;
+  return Math.max(640, view);
+}
+
 /** A results page that was unmounted. `cursor` refetches it from the same API. */
-export type ParkedHitPage = {
+type ParkedHitPage = {
   cursor: string | null;
   firstId: string;
   count: number;
@@ -43,7 +48,7 @@ export const EMPTY_HITS_WINDOW: HitsWindow = {
 };
 
 /** Same opaque cursor the results API uses to continue toward older hits. */
-export function encodeHitCursor(hit: HitExtract): string | null {
+function encodeHitCursor(hit: HitExtract): string | null {
   if (!hit.batchId || !hit.messageId) return null;
   const sortAt = hit.completedAt || hit.updatedAt || "";
   const ordinal = Math.trunc(Number(hit.ordinal) || 0);

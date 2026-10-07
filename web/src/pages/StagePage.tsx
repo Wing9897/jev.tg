@@ -1,5 +1,5 @@
 import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
-import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type MutableRefObject, type ReactNode, type RefObject } from "react";
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type MouseEvent, type MutableRefObject, type ReactNode, type RefObject } from "react";
 import { createPortal } from "react-dom";
 import { api, errorText } from "../api";
 import { notifyTasksSnapshot, SETTINGS_CHANGED_EVENT, TASKS_CHANGED_EVENT } from "../channelSync";
@@ -22,8 +22,8 @@ import {
   HITS_KEEP_PAD,
   HITS_PAGE_SIZE,
   HITS_RELEASE_MIN,
-  HITS_SCROLL_EDGE,
   heightShare,
+  hitsPrefetchEdge,
   parkChunks,
   releaseOutside,
   sameItemIds,
@@ -34,6 +34,12 @@ import type { BatchResult, HitExtract, HitImage, SseEnvelope, StageSnapshot, Tag
 
 const BATCH_FAIL = "\0batch-fail";
 const BATCH_ERROR_HIDE_MS = 10_000;
+/** Last parked page while a head stitch still has older pages to walk. */
+const STITCH_RESUME_ID = "\0stitch-resume";
+
+function isStitchResume(page: { firstId: string } | undefined) {
+  return page?.firstId === STITCH_RESUME_ID;
+}
 const SNAP = { type: "tween" as const, duration: 0.16, ease: "easeOut" as const };
 const MISS_FADE = { type: "tween" as const, duration: 0.18, ease: "easeOut" as const };
 const HANDOFF = { type: "tween" as const, duration: 0.3, ease: "easeOut" as const };
@@ -79,10 +85,8 @@ function asHit(raw: unknown): HitExtract {
     messageId: String(payload.messageId ?? ""),
     taskId: String(payload.taskId ?? ""),
     taskName: (payload.taskName as string | null) ?? null,
-    status: "hit",
     noul: payload.noul == null ? null : Number(payload.noul),
     category: (payload.category as string | null) ?? null,
-    categoryConfidence: payload.categoryConfidence == null ? null : Number(payload.categoryConfidence),
     chatName: (payload.chatName as string | null) ?? null,
     senderName: (payload.senderName as string | null) ?? null,
     content: (payload.content as string | null) ?? null,
@@ -91,7 +95,6 @@ function asHit(raw: unknown): HitExtract {
     images,
     hitCount: payload.hitCount == null ? null : Number(payload.hitCount),
     messageCount: payload.messageCount == null ? null : Number(payload.messageCount),
-    createdAt: payload.createdAt ? String(payload.createdAt) : undefined,
     updatedAt: payload.updatedAt ? String(payload.updatedAt) : undefined,
     completedAt: payload.completedAt ? String(payload.completedAt) : null,
   };
@@ -114,6 +117,8 @@ function asWorkerList(raw: unknown): WorkerState[] {
 
 const HIT_POP_STAGGER_MS = 40;
 const HIT_POP_STAGGER_CAP_MS = 400;
+const HIT_NEW_MS = 60 * 60 * 1000;
+const HIT_NEW_TICK_MS = 60_000;
 
 const imageUrlCache = new WeakMap<HitImage, string>();
 
@@ -349,6 +354,12 @@ function hitMessageMs(hit: HitExtract) {
   if (!hit.timestamp) return null;
   const ms = Date.parse(hit.timestamp);
   return Number.isFinite(ms) ? ms : null;
+}
+
+function hitIsFresh(hit: HitExtract, nowMs: number) {
+  const ms = hitMessageMs(hit);
+  if (ms == null) return false;
+  return nowMs - ms < HIT_NEW_MS;
 }
 
 type HitDayGroup = {
@@ -812,6 +823,7 @@ export default function StagePage({ taskPanel }: { taskPanel: ReactNode }) {
       }
       if (event.type === "batch_error") {
         const batch = asBatch(payload);
+        if (batch.id) claimedBatches.current.delete(batch.id);
         revealBatchError(batch.errorMessage);
         setStage((current) =>
           current ? { ...current, queue: current.queue.filter((item) => item.id !== batch.id) } : current,
@@ -819,6 +831,7 @@ export default function StagePage({ taskPanel }: { taskPanel: ReactNode }) {
       }
       if (event.type === "batch_hit" || event.type === "batch_miss") {
         const batch = asBatch(payload);
+        if (batch.id) claimedBatches.current.delete(batch.id);
         const hit = event.type === "batch_hit";
         setStage((current) =>
           current
@@ -858,7 +871,12 @@ export default function StagePage({ taskPanel }: { taskPanel: ReactNode }) {
     const filtersNow = appliedFiltersRef.current;
     const baselineIds = new Set(hitRowsRef.current.map((item) => item.id));
     const parkedAbove = mode === "newer" ? hitsViewRef.current.abovePages[hitsViewRef.current.abovePages.length - 1] : undefined;
-    const stitchHead = Boolean(mode === "newer" && parkedAbove && parkedAbove.cursor == null && hitsViewRef.current.headStale);
+    const stitchHead = Boolean(
+      mode === "newer" &&
+        parkedAbove &&
+        hitsViewRef.current.headStale &&
+        (parkedAbove.cursor == null || isStitchResume(parkedAbove)),
+    );
     if (mode === "replace") {
       setHitsLoading(true);
       setHitsView(() => ({ ...EMPTY_HITS_WINDOW }));
@@ -886,37 +904,90 @@ export default function StagePage({ taskPanel }: { taskPanel: ReactNode }) {
       if (mode === "newer" && parkedAbove) {
         if (stitchHead) {
           const boundaryId = hitsViewRef.current.items[0]?.id ?? null;
-          const walked: HitExtract[] = [];
-          let walk: string | null = null;
+          const resume = isStitchResume(parkedAbove);
+          const walkStart = resume ? parkedAbove.cursor : null;
+          const walkedPages: { cursor: string | null; items: HitExtract[] }[] = [];
+          let foundBoundary = false;
+          let exhausted = false;
+          let resumeCursor: string | null = null;
+          let walk: string | null = walkStart;
           for (let guard = 0; guard < 40; guard += 1) {
             const page = await fetchPage(walk);
             if (hitsGenRef.current !== gen) return;
             const batch = page.items.map((item) => asHit(item)).filter((item) => item.id);
-            walked.push(...batch);
-            if (boundaryId && batch.some((item) => item.id === boundaryId)) break;
-            if (!page.hasMore || !page.nextCursor) break;
+            walkedPages.push({ cursor: walk, items: batch });
+            if (boundaryId && batch.some((item) => item.id === boundaryId)) {
+              foundBoundary = true;
+              break;
+            }
+            if (!page.hasMore || !page.nextCursor) {
+              exhausted = true;
+              break;
+            }
+            resumeCursor = page.nextCursor;
             walk = page.nextCursor;
           }
           if (hitsGenRef.current !== gen) return;
-          const boundary = boundaryId ? walked.findIndex((item) => item.id === boundaryId) : walked.length;
-          const newerItems = boundary < 0 ? walked : walked.slice(0, boundary);
-          const mount = newerItems.slice(-HITS_PAGE_SIZE);
-          const hidden = newerItems.slice(0, newerItems.length - mount.length);
-          const reparked = hidden.length ? parkChunks(hidden, null) : null;
-          rememberPin();
-          setHitsView((current) => {
-            const seen = new Set(current.items.map((item) => item.id));
-            const incomingSource = reparked || hidden.length === 0 ? mount : newerItems;
-            const incoming = incomingSource.filter((item) => item.id && !seen.has(item.id));
-            return {
-              ...current,
-              items: dedupeHits([...incoming, ...current.items]),
-              abovePages: reparked?.pages ?? [],
-              aboveHeight: 0,
-              mountedCursor: reparked?.nextCursor ?? null,
-              headStale: false,
-            };
-          });
+          const walked = walkedPages.flatMap((page) => page.items);
+          const settled = Boolean((boundaryId && foundBoundary) || exhausted || !resumeCursor);
+          if (!settled && resumeCursor) {
+            if (!resume) rememberPin();
+            setHitsView((current) => {
+              const tail = current.abovePages[current.abovePages.length - 1];
+              if (!tail || tail.cursor !== parkedAbove.cursor || tail.firstId !== parkedAbove.firstId) {
+                if (scrollPinRef.current?.mode === "pin") scrollPinRef.current = null;
+                return current;
+              }
+              const seen = new Set(current.items.map((item) => item.id));
+              const incoming = dedupeHits(walked).filter((item) => item.id && !seen.has(item.id));
+              const parked = parkChunks(incoming, walkStart);
+              let parkedPages: HitsWindow["abovePages"] = parked?.pages ?? [];
+              if (!parked) {
+                parkedPages = [];
+                const parkedIds = new Set(seen);
+                for (const page of walkedPages) {
+                  const items = page.items.filter((item) => item.id && !parkedIds.has(item.id));
+                  for (const item of items) parkedIds.add(item.id);
+                  const first = items[0];
+                  if (!first) continue;
+                  parkedPages.push({ cursor: page.cursor, firstId: first.id, count: items.length });
+                }
+              }
+              const prior = resume ? current.abovePages.slice(0, -1) : [];
+              return {
+                ...current,
+                abovePages: [...prior, ...parkedPages, { cursor: resumeCursor, firstId: STITCH_RESUME_ID, count: 0 }],
+                aboveHeight: prior.length ? current.aboveHeight : 0,
+                headStale: true,
+              };
+            });
+          } else {
+            const boundary = boundaryId ? walked.findIndex((item) => item.id === boundaryId) : walked.length;
+            const newerItems = boundary < 0 ? walked : walked.slice(0, boundary);
+            const mount = newerItems.slice(-HITS_PAGE_SIZE);
+            const hidden = newerItems.slice(0, newerItems.length - mount.length);
+            const reparked = hidden.length ? parkChunks(hidden, walkStart) : null;
+            if (newerItems.some((item) => item.id) || !resume) rememberPin();
+            setHitsView((current) => {
+              const tail = current.abovePages[current.abovePages.length - 1];
+              if (!tail || tail.cursor !== parkedAbove.cursor || tail.firstId !== parkedAbove.firstId) {
+                if (scrollPinRef.current?.mode === "pin") scrollPinRef.current = null;
+                return current;
+              }
+              const seen = new Set(current.items.map((item) => item.id));
+              const incomingSource = reparked || hidden.length === 0 ? mount : newerItems;
+              const incoming = incomingSource.filter((item) => item.id && !seen.has(item.id));
+              const prior = resume ? current.abovePages.slice(0, -1) : [];
+              return {
+                ...current,
+                items: dedupeHits([...incoming, ...current.items]),
+                abovePages: [...prior, ...(reparked?.pages ?? [])],
+                aboveHeight: prior.length ? current.aboveHeight : 0,
+                mountedCursor: reparked?.nextCursor ?? walkStart,
+                headStale: false,
+              };
+            });
+          }
         } else {
           const page = await fetchPage(parkedAbove.cursor);
           if (hitsGenRef.current !== gen) return;
@@ -1035,12 +1106,13 @@ export default function StagePage({ taskPanel }: { taskPanel: ReactNode }) {
     const el = hitsScrollRef.current;
     if (!el || hitsLoading || hitsLoadingMore || hitsLoadingNewer || suppressEdgeRef.current) return;
     const edges = readEdges(el);
+    const edge = hitsPrefetchEdge(el.clientHeight);
     const view = hitsViewRef.current;
-    if (view.abovePages.length > 0 && !hitsNewerFailedRef.current && edges.distUp < HITS_SCROLL_EDGE) {
+    if (view.abovePages.length > 0 && !hitsNewerFailedRef.current && edges.distUp < edge) {
       void loadHitsRef.current("newer");
       return;
     }
-    if ((view.hasMore || view.belowCount > 0) && !hitsMoreFailedRef.current && edges.distDown < HITS_SCROLL_EDGE) {
+    if ((view.hasMore || view.belowCount > 0) && !hitsMoreFailedRef.current && edges.distDown < edge) {
       void loadHitsRef.current("older");
     }
   }, [hitsView.items, hitsView.hasMore, hitsView.belowCount, hitsView.abovePages, hitsView.aboveHeight, hitsView.belowHeight, hitsLoading, hitsLoadingMore, hitsLoadingNewer]);
@@ -1054,12 +1126,13 @@ export default function StagePage({ taskPanel }: { taskPanel: ReactNode }) {
     const el = hitsScrollRef.current;
     if (!el || hitsBusyRef.current) return;
     const edges = readEdges(el);
+    const edge = hitsPrefetchEdge(el.clientHeight);
     const view = hitsViewRef.current;
-    if (view.abovePages.length > 0 && edges.distUp < HITS_SCROLL_EDGE) {
+    if (view.abovePages.length > 0 && edges.distUp < edge) {
       void loadHitsRef.current("newer");
       return;
     }
-    if ((view.hasMore || view.belowCount > 0) && edges.distDown < HITS_SCROLL_EDGE) {
+    if ((view.hasMore || view.belowCount > 0) && edges.distDown < edge) {
       void loadHitsRef.current("older");
     }
   }, []);
@@ -1660,12 +1733,14 @@ function wantsReducedMotion(hookValue: boolean | null) {
 const ResultCard = memo(function ResultCard({
   hit,
   bornDelayMs,
+  fresh,
   categoryText,
   locale,
   onOpenImage,
 }: {
   hit: HitExtract;
   bornDelayMs: number | null;
+  fresh: boolean;
   categoryText: string;
   locale: Locale;
   onOpenImage: (urls: string[], index: number, label: string, trigger: HTMLElement) => void;
@@ -1676,10 +1751,23 @@ const ResultCard = memo(function ResultCard({
     bornDelay.current = bornDelayMs != null && !wantsReducedMotion(reduceMotion) ? bornDelayMs : null;
   }
   const [popDone, setPopDone] = useState(false);
+  const [imageIndex, setImageIndex] = useState(0);
+  const [imageSwap, setImageSwap] = useState(false);
   const popDelay = bornDelay.current;
   const showPop = popDelay != null && !popDone;
   const m = messages[locale];
   const images = hit.images ?? [];
+  const imageCount = images.length;
+  const shownIndex = imageCount === 0 ? 0 : Math.min(imageIndex, imageCount - 1);
+  const shown = images[shownIndex];
+  const fadeImage = imageSwap && !wantsReducedMotion(reduceMotion);
+  function moveImage(event: MouseEvent<HTMLButtonElement>, next: number) {
+    event.preventDefault();
+    event.stopPropagation();
+    if (next < 0 || next >= imageCount || next === shownIndex) return;
+    if (!wantsReducedMotion(reduceMotion)) setImageSwap(true);
+    setImageIndex(next);
+  }
   const sender = hit.senderName || m.stage.unknownSender;
   const title = hit.taskName || m.stage.taskFallback;
   const titleColor = taskTone(hit.taskId, hit.taskName);
@@ -1693,26 +1781,63 @@ const ResultCard = memo(function ResultCard({
         setPopDone(true);
       }}
     >
-      {images.length ? (
+      {shown ? (
         <div className="hit-media">
-          {images.map((image, index) => (
-            <button
-              key={`${hit.id}-${index}`}
-              type="button"
-              className="hit-media-btn"
-              aria-label={m.stage.enlargeImage}
-              onClick={(event) => onOpenImage(images.map((item) => stableImageUrl(item)), index, title, event.currentTarget)}
-            >
-              <img src={stableImageUrl(image)} alt="" width={320} height={160} decoding="async" loading="lazy" />
-            </button>
-          ))}
+          <button
+            type="button"
+            className="hit-media-btn"
+            aria-label={m.stage.enlargeImage}
+            onClick={(event) => onOpenImage(images.map((item) => stableImageUrl(item)), shownIndex, title, event.currentTarget)}
+          >
+            <img
+              key={`${hit.id}-${shownIndex}`}
+              className={fadeImage ? "is-swap" : undefined}
+              src={stableImageUrl(shown)}
+              alt=""
+              width={320}
+              height={160}
+              decoding="async"
+              loading="lazy"
+            />
+          </button>
+          {imageCount > 1 ? (
+            <>
+              <button
+                type="button"
+                className="hit-media-nav is-prev"
+                aria-label={m.stage.prevImage}
+                disabled={shownIndex <= 0}
+                onMouseDown={(event) => event.preventDefault()}
+                onClick={(event) => moveImage(event, shownIndex - 1)}
+              >
+                <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true">
+                  <path d="M14.5 6 8.5 12l6 6" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+                </svg>
+              </button>
+              <button
+                type="button"
+                className="hit-media-nav is-next"
+                aria-label={m.stage.nextImage}
+                disabled={shownIndex >= imageCount - 1}
+                onMouseDown={(event) => event.preventDefault()}
+                onClick={(event) => moveImage(event, shownIndex + 1)}
+              >
+                <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true">
+                  <path d="M9.5 6l6 6-6 6" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+                </svg>
+              </button>
+            </>
+          ) : null}
         </div>
       ) : null}
       <div className="hit-body">
         <div className="hit-head">
-          <p className="hit-title" style={titleColor ? { color: titleColor } : undefined} title={title}>
-            {title}
-          </p>
+          <div className="hit-title-line">
+            <p className="hit-title" style={titleColor ? { color: titleColor } : undefined} title={title}>
+              {title}
+            </p>
+            {fresh ? <span className="hit-new">{m.stage.hitNew}</span> : null}
+          </div>
           <span className="hit-cat" style={categoryTone(categoryText)} title={categoryText}>
             {categoryText}
           </span>
@@ -1766,6 +1891,7 @@ const HitsPane = memo(function HitsPane({
   const m = messages[locale];
   const groups = useMemo(() => groupHitsByMessageDay(items), [items]);
   const [dayClock, setDayClock] = useState(() => Date.now());
+  const [badgeNow, setBadgeNow] = useState(() => Date.now());
   const previewTrigger = useRef<HTMLElement | null>(null);
   const [preview, setPreview] = useState<HitPreview | null>(null);
   const openHitImage = useCallback((urls: string[], index: number, label: string, trigger: HTMLElement) => {
@@ -1794,6 +1920,10 @@ const HitsPane = memo(function HitsPane({
     const timer = window.setTimeout(() => setDayClock(Date.now()), Math.max(1000, nextMidnight.getTime() - Date.now()));
     return () => window.clearTimeout(timer);
   }, [dayClock]);
+  useEffect(() => {
+    const timer = window.setInterval(() => setBadgeNow(Date.now()), HIT_NEW_TICK_MS);
+    return () => window.clearInterval(timer);
+  }, []);
   useLayoutEffect(() => {
     const host = scrollRef.current;
     if (!host) return;
@@ -1895,6 +2025,7 @@ const HitsPane = memo(function HitsPane({
                           key={item.id}
                           hit={item}
                           bornDelayMs={bornDelayMs}
+                          fresh={hitIsFresh(item, badgeNow)}
                           categoryText={categoryLabel(tags, item.category)}
                           locale={locale}
                           onOpenImage={openHitImage}

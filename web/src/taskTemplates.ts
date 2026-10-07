@@ -2,7 +2,7 @@
 
 import type { Locale } from "./i18n/messages";
 
-export interface BuiltinTaskTemplate {
+interface BuiltinTaskTemplate {
   id: string;
   name: string;
   prompt: string;
