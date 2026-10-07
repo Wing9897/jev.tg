@@ -13,14 +13,28 @@ import { useI18n } from "../i18n/context";
 import { intlTag, messages, type Locale } from "../i18n/messages";
 import { PanelLink } from "../panelFocus";
 import { openShellDialog } from "../shellDialogs";
-import { MAX_SIMULTANEOUS_FLIGHTS, type Flight } from "../stage/flights";
+import type { Flight } from "../stage/flights";
+import {
+  EMPTY_HITS_WINDOW,
+  HITS_AT_TOP_PX,
+  HITS_IDLE_MS,
+  HITS_KEEP_MAX,
+  HITS_KEEP_PAD,
+  HITS_PAGE_SIZE,
+  HITS_RELEASE_MIN,
+  HITS_SCROLL_EDGE,
+  heightShare,
+  parkChunks,
+  releaseOutside,
+  sameItemIds,
+  type HitsWindow,
+} from "../stage/hitWindow";
 import { useSse, type SseStatus } from "../sse";
 import type { BatchResult, HitExtract, HitImage, SseEnvelope, StageSnapshot, Tag, Task, WorkerState } from "../types";
 
 const BATCH_FAIL = "\0batch-fail";
 const BATCH_ERROR_HIDE_MS = 10_000;
 const SNAP = { type: "tween" as const, duration: 0.16, ease: "easeOut" as const };
-const HIT_FLY = { type: "tween" as const, duration: 0.3, ease: "easeOut" as const };
 const MISS_FADE = { type: "tween" as const, duration: 0.18, ease: "easeOut" as const };
 const HANDOFF = { type: "tween" as const, duration: 0.3, ease: "easeOut" as const };
 const ROW_FADE = { type: "tween" as const, duration: 0.18, ease: "easeOut" as const };
@@ -98,9 +112,8 @@ function asWorkerList(raw: unknown): WorkerState[] {
   return raw.map((item) => asWorker((item ?? {}) as Record<string, unknown>));
 }
 
-const HITS_PAGE_SIZE = 40;
-const HITS_SCROLL_EDGE = 280;
-const FRESH_MS = 460;
+const HIT_POP_STAGGER_MS = 40;
+const HIT_POP_STAGGER_CAP_MS = 400;
 
 const imageUrlCache = new WeakMap<HitImage, string>();
 
@@ -180,11 +193,28 @@ function stageViewSame(current: StageSnapshot | null, next: StageSnapshot) {
 
 type HitFilter = { query: string; taskId: string; category: string; minNoul: string };
 
-type HitsView = {
-  items: HitExtract[];
-  total: number;
-  hasMore: boolean;
-  accounted: string[];
+type ScrollPin =
+  | { mode: "pin"; id: string; top: number; done: boolean }
+  | {
+      mode: "release";
+      token: number;
+      id: string;
+      top: number;
+      offset: number;
+      scrollHeight: number;
+      nextCount: number;
+      measured: boolean;
+      aboveAdd: number;
+      belowAdd: number;
+      baseAbove: number;
+      baseBelow: number;
+    };
+
+type HitsHold = {
+  hover: boolean;
+  pointerDown: boolean;
+  lightbox: boolean;
+  lastActive: number;
 };
 
 function categoryLabel(tags: Tag[], key?: string | null) {
@@ -233,6 +263,11 @@ function hitColumnCount(width: number) {
   return Math.max(1, Math.floor((width + HIT_GAP) / (HIT_COL_MIN + HIT_GAP)));
 }
 
+function hitBubblePlaying(card: HTMLElement) {
+  if (!card.classList.contains("is-born")) return false;
+  return card.getAnimations().some((anim) => anim instanceof CSSAnimation && anim.animationName === "hit-bubble");
+}
+
 function packHitBricks(root: HTMLElement) {
   const width = root.clientWidth;
   if (width <= 0) return;
@@ -254,16 +289,17 @@ function packHitBricks(root: HTMLElement) {
     ws.push(Math.max(0, columnWidth));
     cursor += columnWidth + HIT_GAP;
   }
+  const bubbling = new Set(cards.filter(hitBubblePlaying));
   cards.forEach((card, index) => {
     const col = index % cols;
     card.style.left = `${xs[col]}px`;
     card.style.width = `${ws[col]}px`;
-    card.style.contentVisibility = "visible";
+    if (!bubbling.has(card)) card.style.contentVisibility = "visible";
   });
   const heights = new Array<number>(cols).fill(0);
   const measured = cards.map((card) => card.offsetHeight);
   cards.forEach((card) => {
-    card.style.contentVisibility = "";
+    if (!bubbling.has(card)) card.style.contentVisibility = "";
   });
   cards.forEach((card, index) => {
     const col = index % cols;
@@ -290,17 +326,6 @@ function hitMatches(item: HitExtract, filters: HitFilter) {
   const min = minNoulValue(filters.minNoul);
   if (min != null && (item.noul ?? 0) < min) return false;
   return true;
-}
-
-function flyingHitIds(flights: Flight[], pending: HitExtract[]) {
-  const ids = new Set<string>();
-  for (const item of flights) {
-    if (item.kind === "hit" && item.hit) ids.add(item.hit.id);
-  }
-  for (const card of pending) {
-    if (card.id) ids.add(card.id);
-  }
-  return ids;
 }
 
 function dedupeHits(cards: HitExtract[]) {
@@ -368,18 +393,104 @@ function dayChipLabel(key: string, locale: Locale, todayLabel: string, yesterday
   });
 }
 
+function hitCards(scroller: HTMLElement) {
+  return Array.from(scroller.querySelectorAll<HTMLElement>(".hit-grid .result-card[data-hit-id]"));
+}
+
+function contentOffset(scroller: HTMLElement, node: HTMLElement) {
+  return node.getBoundingClientRect().top - scroller.getBoundingClientRect().top + scroller.scrollTop;
+}
+
+function readEdges(scroller: HTMLElement) {
+  const days = scroller.querySelector<HTMLElement>(".hit-days");
+  if (!days) {
+    return {
+      distUp: scroller.scrollTop,
+      distDown: scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight,
+    };
+  }
+  const above = days.querySelector<HTMLElement>(":scope > .hit-spacer-above")?.offsetHeight ?? 0;
+  const below = days.querySelector<HTMLElement>(":scope > .hit-spacer-below")?.offsetHeight ?? 0;
+  const daysTop = days.offsetTop;
+  return {
+    distUp: scroller.scrollTop - (daysTop + above),
+    distDown: daysTop + days.offsetHeight - below - scroller.scrollTop - scroller.clientHeight,
+  };
+}
+
+function anchorCard(scroller: HTMLElement) {
+  const cards = hitCards(scroller);
+  const viewTop = scroller.getBoundingClientRect().top;
+  const viewBottom = viewTop + scroller.clientHeight;
+  let fallback: HTMLElement | null = null;
+  for (const card of cards) {
+    const rect = card.getBoundingClientRect();
+    const visible = rect.bottom > viewTop + 1 && rect.top < viewBottom - 1;
+    if (!visible) continue;
+    if (!fallback) fallback = card;
+    if (!hitBubblePlaying(card) && card.dataset.hitId) {
+      return { id: card.dataset.hitId, top: rect.top, node: card };
+    }
+  }
+  if (!fallback?.dataset.hitId) return null;
+  return { id: fallback.dataset.hitId, top: fallback.getBoundingClientRect().top, node: fallback };
+}
+
+function keepDomRange(cards: HTMLElement[], scroller: HTMLElement) {
+  const viewTop = scroller.getBoundingClientRect().top;
+  const viewBottom = viewTop + scroller.clientHeight;
+  let firstVisible = -1;
+  let lastVisible = -1;
+  for (let index = 0; index < cards.length; index += 1) {
+    const rect = cards[index].getBoundingClientRect();
+    if (rect.bottom > viewTop + 1 && rect.top < viewBottom - 1) {
+      if (firstVisible < 0) firstVisible = index;
+      lastVisible = index;
+    }
+  }
+  if (firstVisible < 0) {
+    const mid = (viewTop + viewBottom) / 2;
+    let best = 0;
+    let bestDist = Number.POSITIVE_INFINITY;
+    for (let index = 0; index < cards.length; index += 1) {
+      const rect = cards[index].getBoundingClientRect();
+      const dist = Math.abs((rect.top + rect.bottom) / 2 - mid);
+      if (dist < bestDist) {
+        bestDist = dist;
+        best = index;
+      }
+    }
+    firstVisible = best;
+    lastVisible = best;
+  }
+  const dayKey = (card: HTMLElement) => card.closest(".hit-day")?.getAttribute("data-day") ?? "";
+  const days = new Set<string>();
+  for (let index = firstVisible; index <= lastVisible; index += 1) days.add(dayKey(cards[index]));
+  let start = firstVisible;
+  let end = lastVisible;
+  while (start > 0 && days.has(dayKey(cards[start - 1]))) start -= 1;
+  while (end < cards.length - 1 && days.has(dayKey(cards[end + 1]))) end += 1;
+  start = Math.max(0, start - HITS_KEEP_PAD);
+  end = Math.min(cards.length - 1, end + HITS_KEEP_PAD);
+  while (end - start + 1 > HITS_KEEP_MAX) {
+    const padBefore = firstVisible - start;
+    const padAfter = end - lastVisible;
+    if (padBefore <= 0 && padAfter <= 0) break;
+    if (padBefore >= padAfter) start += 1;
+    else end -= 1;
+  }
+  start = Math.min(start, firstVisible);
+  end = Math.max(end, lastVisible);
+  return { start, end };
+}
+
 export default function StagePage({ taskPanel }: { taskPanel: ReactNode }) {
   const reduceMotion = useReducedMotion();
-  const resultsRef = useRef<HTMLElement | null>(null);
   const aiCoreRef = useRef<HTMLDivElement>(null);
   const queueNodes = useRef(new Map<string, HTMLDivElement>());
   const stageRef = useRef<StageSnapshot | null>(null);
   const claimedBatches = useRef(new Set<string>());
   const reduceMotionRef = useRef(false);
-  const flightsRef = useRef<Flight[]>([]);
-  const pendingHits = useRef<HitExtract[]>([]);
-  const flyingCount = useRef(0);
-  const landedIds = useRef(new Set<string>());
   const ingestBuf = useRef({ n: 0, last: "", pending: 0, timer: 0 });
   const liveEpoch = useRef(0);
 
@@ -392,19 +503,30 @@ export default function StagePage({ taskPanel }: { taskPanel: ReactNode }) {
   const [loading, setLoading] = useState(true);
   const [filters, setFilters] = useState<HitFilter>({ query: "", taskId: "", category: "", minNoul: "" });
   const [applied, setApplied] = useState<HitFilter>({ query: "", taskId: "", category: "", minNoul: "" });
-  const [hitsView, setHitsView] = useState<HitsView>({ items: [], total: 0, hasMore: false, accounted: [] });
+  const [hitsView, setHitsView] = useState<HitsWindow>(EMPTY_HITS_WINDOW);
   const [hitsLoading, setHitsLoading] = useState(true);
   const [hitsLoadingMore, setHitsLoadingMore] = useState(false);
+  const [hitsLoadingNewer, setHitsLoadingNewer] = useState(false);
   const hitsScrollRef = useRef<HTMLDivElement | null>(null);
+  const hitsToolbarRef = useRef<HTMLDivElement | null>(null);
   const hitsCursorRef = useRef<string | null>(null);
   const hitsHasMoreRef = useRef(false);
   const hitsGenRef = useRef(0);
   const hitsBusyRef = useRef(false);
   const hitsMoreFailedRef = useRef(false);
+  const hitsNewerFailedRef = useRef(false);
+  const hitsViewRef = useRef(hitsView);
   const appliedFiltersRef = useRef<HitFilter>(applied);
   const hitRowsRef = useRef<HitExtract[]>([]);
-  const loadHitsRef = useRef<(mode: "replace" | "more") => Promise<void>>(async () => {});
+  const loadHitsRef = useRef<(mode: "replace" | "older" | "newer") => Promise<void>>(async () => {});
+  const scrollPinRef = useRef<ScrollPin | null>(null);
+  const pinAdjustingRef = useRef(false);
+  const suppressEdgeRef = useRef(false);
+  const pinTokenRef = useRef(0);
+  const hitsHoldRef = useRef<HitsHold>({ hover: false, pointerDown: false, lightbox: false, lastActive: 0 });
+  const seenCategoriesRef = useRef(new Map<string, string>());
   appliedFiltersRef.current = applied;
+  hitsViewRef.current = hitsView;
   hitRowsRef.current = hitsView.items;
   const [flights, setFlights] = useState<Flight[]>([]);
   const [sseStatus, setSseStatus] = useState<SseStatus>("connecting");
@@ -412,26 +534,14 @@ export default function StagePage({ taskPanel }: { taskPanel: ReactNode }) {
   const [lastErrorBatch, setLastErrorBatch] = useState<string | null>(null);
   const [batchErrorFading, setBatchErrorFading] = useState(false);
   const [batchErrorShownAt, setBatchErrorShownAt] = useState(0);
-  const [impact, setImpact] = useState(0);
-  const [freshIds, setFreshIds] = useState<Record<string, number>>({});
+  const [birthIds, setBirthIds] = useState<string[]>([]);
   const [handoffs, setHandoffs] = useState<QueueHandoff[]>([]);
 
   useEffect(() => {
-    if (Object.keys(freshIds).length === 0) return;
-    const timer = window.setTimeout(() => {
-      const cutoff = Date.now() - FRESH_MS;
-      setFreshIds((current) => {
-        const next: Record<string, number> = {};
-        for (const [id, at] of Object.entries(current)) {
-          if (at >= cutoff) next[id] = at;
-        }
-        return Object.keys(next).length === Object.keys(current).length ? current : next;
-      });
-    }, FRESH_MS);
-    return () => window.clearTimeout(timer);
-  }, [freshIds]);
+    if (birthIds.length === 0) return;
+    setBirthIds([]);
+  }, [birthIds]);
 
-  flightsRef.current = flights;
   stageRef.current = stage;
   reduceMotionRef.current = Boolean(reduceMotion);
 
@@ -448,26 +558,41 @@ export default function StagePage({ taskPanel }: { taskPanel: ReactNode }) {
     const filtersNow = appliedFiltersRef.current;
     const fresh = cards.filter((card) => card.id && hitMatches(card, filtersNow));
     if (!fresh.length) return;
-    setFreshIds((current) => {
-      const next = { ...current };
-      for (const card of fresh) next[card.id] = Date.now();
-      return next;
-    });
+    const seen = new Set(hitRowsRef.current.map((item) => item.id));
+    const incoming = fresh.filter((card) => !seen.has(card.id));
+    if (!incoming.length) return;
+    const incomingIds = incoming.map((card) => card.id);
+    const headParked = hitsViewRef.current.abovePages.length > 0;
+    const scroller = hitsScrollRef.current;
+    const atTop = !headParked && !!scroller && scroller.scrollTop <= HITS_AT_TOP_PX;
+    if (!headParked) {
+      setBirthIds((current) => {
+        const have = new Set(current);
+        const extra = incomingIds.filter((id) => !have.has(id));
+        return extra.length ? [...current, ...extra] : current;
+      });
+      if (!atTop && scroller) {
+        const anchor = anchorCard(scroller);
+        if (anchor) scrollPinRef.current = { mode: "pin", id: anchor.id, top: anchor.top, done: false };
+      }
+    }
     setHitsView((current) => {
-      const seen = new Set(current.items.map((item) => item.id));
-      const incoming = fresh.filter((card) => !seen.has(card.id));
-      if (!incoming.length) return current;
-      const accounted = new Set(current.accounted);
-      let add = 0;
-      for (const card of incoming) {
-        if (accounted.has(card.id)) accounted.delete(card.id);
-        else add += 1;
+      const seenNow = new Set(current.items.map((item) => item.id));
+      const incomingNow = fresh.filter((card) => !seenNow.has(card.id));
+      if (!incomingNow.length) return current;
+      const add = incomingNow.length;
+      if (current.abovePages.length > 0) {
+        scrollPinRef.current = null;
+        return {
+          ...current,
+          total: current.total + add,
+          headStale: true,
+        };
       }
       return {
         ...current,
-        items: [...incoming, ...current.items],
+        items: [...incomingNow, ...current.items],
         total: current.total + add,
-        accounted: [...accounted],
       };
     });
   }, []);
@@ -479,31 +604,12 @@ export default function StagePage({ taskPanel }: { taskPanel: ReactNode }) {
         if (!reduceMotion && from) {
           setFlights((current) => [
             ...current.filter((item) => item.id !== miss.id),
-            { id: miss.id, kind: "miss", batch: miss, from },
+            { id: miss.id, batch: miss, from },
           ]);
         }
       }
       const cards = hits.filter((card) => card.id);
-      if (!cards.length) return;
-      if (reduceMotion || !aiCoreRef.current) {
-        placeResults(cards);
-        return;
-      }
-      const room = Math.max(0, MAX_SIMULTANEOUS_FLIGHTS - flyingCount.current);
-      const now = cards.slice(0, room);
-      const queueRoom = Math.max(0, 8 - pendingHits.current.length);
-      const queued = cards.slice(room, room + queueRoom);
-      const overflow = cards.slice(room + queued.length);
-      pendingHits.current.push(...queued);
-      if (overflow.length) placeResults(overflow);
-      if (!now.length) return;
-      flyingCount.current += now.length;
-      const from = aiCoreRef.current.getBoundingClientRect();
-      const to = resultsRef.current?.getBoundingClientRect();
-      setFlights((current) => [
-        ...current,
-        ...now.map((card) => ({ id: card.id, kind: "hit" as const, hit: card, from, to })),
-      ]);
+      if (cards.length) placeResults(cards);
     },
     [placeResults, reduceMotion],
   );
@@ -736,39 +842,118 @@ export default function StagePage({ taskPanel }: { taskPanel: ReactNode }) {
   );
   useSse(onEvent, setSseStatus);
 
-  const loadHits = useCallback(async (mode: "replace" | "more") => {
-    if (mode === "more" && (hitsBusyRef.current || !hitsHasMoreRef.current || !hitsCursorRef.current)) return;
+  const loadHits = useCallback(async (mode: "replace" | "older" | "newer") => {
+    if (mode === "older" && (hitsBusyRef.current || !hitsCursorRef.current || (!hitsHasMoreRef.current && hitsViewRef.current.belowCount <= 0))) return;
+    if (mode === "newer" && (hitsBusyRef.current || hitsViewRef.current.abovePages.length === 0)) return;
     const gen = mode === "replace" ? (hitsGenRef.current += 1) : hitsGenRef.current;
-    const cursor = mode === "more" ? hitsCursorRef.current : null;
+    const cursor = mode === "older" ? hitsCursorRef.current : null;
     if (mode === "replace") {
       hitsCursorRef.current = null;
       hitsHasMoreRef.current = false;
+      scrollPinRef.current = null;
+      suppressEdgeRef.current = false;
     }
     hitsBusyRef.current = true;
+    hitsHoldRef.current.lastActive = Date.now();
     const filtersNow = appliedFiltersRef.current;
     const baselineIds = new Set(hitRowsRef.current.map((item) => item.id));
+    const parkedAbove = mode === "newer" ? hitsViewRef.current.abovePages[hitsViewRef.current.abovePages.length - 1] : undefined;
+    const stitchHead = Boolean(mode === "newer" && parkedAbove && parkedAbove.cursor == null && hitsViewRef.current.headStale);
     if (mode === "replace") {
       setHitsLoading(true);
-      setHitsView((current) => ({ ...current, items: [], hasMore: false }));
-    } else {
+      setHitsView(() => ({ ...EMPTY_HITS_WINDOW }));
+    } else if (mode === "older") {
       setHitsLoadingMore(true);
+    } else {
+      setHitsLoadingNewer(true);
     }
-    try {
-      const page = await api.results({
+    const fetchPage = (pageCursor: string | null) =>
+      api.results({
         limit: HITS_PAGE_SIZE,
-        cursor: cursor ?? undefined,
+        cursor: pageCursor ?? undefined,
         q: filtersNow.query,
         taskId: filtersNow.taskId,
         category: filtersNow.category,
         minNoul: filtersNow.minNoul,
       });
+    const rememberPin = () => {
+      const scroller = hitsScrollRef.current;
+      if (!scroller) return;
+      const anchor = anchorCard(scroller);
+      if (anchor) scrollPinRef.current = { mode: "pin", id: anchor.id, top: anchor.top, done: false };
+    };
+    try {
+      if (mode === "newer" && parkedAbove) {
+        if (stitchHead) {
+          const boundaryId = hitsViewRef.current.items[0]?.id ?? null;
+          const walked: HitExtract[] = [];
+          let walk: string | null = null;
+          for (let guard = 0; guard < 40; guard += 1) {
+            const page = await fetchPage(walk);
+            if (hitsGenRef.current !== gen) return;
+            const batch = page.items.map((item) => asHit(item)).filter((item) => item.id);
+            walked.push(...batch);
+            if (boundaryId && batch.some((item) => item.id === boundaryId)) break;
+            if (!page.hasMore || !page.nextCursor) break;
+            walk = page.nextCursor;
+          }
+          if (hitsGenRef.current !== gen) return;
+          const boundary = boundaryId ? walked.findIndex((item) => item.id === boundaryId) : walked.length;
+          const newerItems = boundary < 0 ? walked : walked.slice(0, boundary);
+          const mount = newerItems.slice(-HITS_PAGE_SIZE);
+          const hidden = newerItems.slice(0, newerItems.length - mount.length);
+          const reparked = hidden.length ? parkChunks(hidden, null) : null;
+          rememberPin();
+          setHitsView((current) => {
+            const seen = new Set(current.items.map((item) => item.id));
+            const incomingSource = reparked || hidden.length === 0 ? mount : newerItems;
+            const incoming = incomingSource.filter((item) => item.id && !seen.has(item.id));
+            return {
+              ...current,
+              items: dedupeHits([...incoming, ...current.items]),
+              abovePages: reparked?.pages ?? [],
+              aboveHeight: 0,
+              mountedCursor: reparked?.nextCursor ?? null,
+              headStale: false,
+            };
+          });
+        } else {
+          const page = await fetchPage(parkedAbove.cursor);
+          if (hitsGenRef.current !== gen) return;
+          const pageItems = page.items.map((item) => asHit(item)).filter((item) => item.id);
+          rememberPin();
+          setHitsView((current) => {
+            const pages = current.abovePages;
+            const target = pages[pages.length - 1];
+            if (!target || target.cursor !== parkedAbove.cursor || target.firstId !== parkedAbove.firstId) {
+              if (scrollPinRef.current?.mode === "pin") scrollPinRef.current = null;
+              return current;
+            }
+            const seen = new Set(current.items.map((item) => item.id));
+            const incoming = pageItems.filter((item) => item.id && !seen.has(item.id));
+            const total = pages.reduce((sum, item) => sum + item.count, 0);
+            const share = heightShare(current.aboveHeight, target.count, total);
+            const abovePages = pages.slice(0, -1);
+            return {
+              ...current,
+              items: dedupeHits([...incoming, ...current.items]),
+              abovePages,
+              aboveHeight: Math.max(0, current.aboveHeight - share),
+              mountedCursor: target.cursor,
+              headStale: abovePages.length > 0 ? current.headStale : false,
+            };
+          });
+        }
+        hitsNewerFailedRef.current = false;
+        return;
+      }
+      const page = await fetchPage(cursor);
       if (hitsGenRef.current !== gen) return;
-      const hidden = flyingHitIds(flightsRef.current, pendingHits.current);
       const pageItems = page.items.map((item) => asHit(item));
       let hasMore = Boolean(page.hasMore && page.nextCursor);
-      if (mode === "more") {
+      if (mode === "older") {
         const seen = new Set(hitRowsRef.current.map((item) => item.id));
-        const incoming = pageItems.filter((item) => item.id && !seen.has(item.id) && !hidden.has(item.id));
+        const incoming = pageItems.filter((item) => item.id && !seen.has(item.id));
         if (!incoming.length) hasMore = false;
       }
       if (!pageItems.length) hasMore = false;
@@ -779,39 +964,52 @@ export default function StagePage({ taskPanel }: { taskPanel: ReactNode }) {
         setHitsView((current) => {
           const pageIds = new Set(pageItems.map((item) => item.id));
           const arrived = current.items.filter((item) => item.id && !baselineIds.has(item.id) && hitMatches(item, filtersNow));
-          const prepend = arrived.filter((item) => !pageIds.has(item.id) && !hidden.has(item.id));
-          const visible = pageItems.filter((item) => item.id && !hidden.has(item.id));
+          const prepend = arrived.filter((item) => !pageIds.has(item.id));
+          const visible = pageItems.filter((item) => item.id);
           return {
+            ...EMPTY_HITS_WINDOW,
             items: dedupeHits([...prepend, ...visible]),
             total: page.total + prepend.length,
             hasMore,
-            accounted: pageItems.filter((item) => hidden.has(item.id)).map((item) => item.id),
           };
         });
       } else {
+        if (hitsViewRef.current.belowCount > 0) rememberPin();
         setHitsView((current) => {
           const seen = new Set(current.items.map((item) => item.id));
-          const incoming = pageItems.filter((item) => item.id && !seen.has(item.id) && !hidden.has(item.id));
+          const incoming = pageItems.filter((item) => item.id && !seen.has(item.id));
+          if (!incoming.length || !hasMore) {
+            return {
+              ...current,
+              items: incoming.length ? [...current.items, ...incoming] : current.items,
+              hasMore,
+              belowCount: 0,
+              belowHeight: 0,
+            };
+          }
+          const take = Math.min(incoming.length, current.belowCount);
+          const share = heightShare(current.belowHeight, take, current.belowCount);
           return {
             ...current,
             items: [...current.items, ...incoming],
             hasMore,
-            accounted: [
-              ...current.accounted,
-              ...pageItems.filter((item) => hidden.has(item.id) && !current.accounted.includes(item.id)).map((item) => item.id),
-            ],
+            belowCount: Math.max(0, current.belowCount - take),
+            belowHeight: Math.max(0, current.belowHeight - share),
           };
         });
       }
     } catch (err) {
       if (hitsGenRef.current !== gen) return;
-      if (mode === "more") hitsMoreFailedRef.current = true;
+      if (mode === "older") hitsMoreFailedRef.current = true;
+      if (mode === "newer") hitsNewerFailedRef.current = true;
       setError(errorText(err));
     } finally {
       if (hitsGenRef.current === gen) {
         hitsBusyRef.current = false;
+        hitsHoldRef.current.lastActive = Date.now();
         setHitsLoading(false);
         setHitsLoadingMore(false);
+        setHitsLoadingNewer(false);
       }
     }
   }, []);
@@ -828,24 +1026,143 @@ export default function StagePage({ taskPanel }: { taskPanel: ReactNode }) {
 
   const appliedKey = `${applied.query}\0${applied.taskId}\0${applied.category}\0${applied.minNoul}`;
   useEffect(() => {
+    seenCategoriesRef.current.clear();
     hitsScrollRef.current?.scrollTo({ top: 0 });
     void loadHitsRef.current("replace");
   }, [appliedKey]);
 
   useEffect(() => {
     const el = hitsScrollRef.current;
-    if (!el || hitsLoading || hitsLoadingMore || !hitsView.hasMore || hitsMoreFailedRef.current) return;
-    const gap = el.scrollHeight - el.scrollTop - el.clientHeight;
-    if (gap > HITS_SCROLL_EDGE) return;
-    void loadHitsRef.current("more");
-  }, [hitsView.items, hitsView.hasMore, hitsLoading, hitsLoadingMore]);
+    if (!el || hitsLoading || hitsLoadingMore || hitsLoadingNewer || suppressEdgeRef.current) return;
+    const edges = readEdges(el);
+    const view = hitsViewRef.current;
+    if (view.abovePages.length > 0 && !hitsNewerFailedRef.current && edges.distUp < HITS_SCROLL_EDGE) {
+      void loadHitsRef.current("newer");
+      return;
+    }
+    if ((view.hasMore || view.belowCount > 0) && !hitsMoreFailedRef.current && edges.distDown < HITS_SCROLL_EDGE) {
+      void loadHitsRef.current("older");
+    }
+  }, [hitsView.items, hitsView.hasMore, hitsView.belowCount, hitsView.abovePages, hitsView.aboveHeight, hitsView.belowHeight, hitsLoading, hitsLoadingMore, hitsLoadingNewer]);
 
   const onHitsScroll = useCallback(() => {
-    const el = hitsScrollRef.current;
-    if (!el) return;
-    if (el.scrollHeight - el.scrollTop - el.clientHeight > HITS_SCROLL_EDGE) return;
+    if (pinAdjustingRef.current) return;
+    suppressEdgeRef.current = false;
+    hitsHoldRef.current.lastActive = Date.now();
     hitsMoreFailedRef.current = false;
-    void loadHitsRef.current("more");
+    hitsNewerFailedRef.current = false;
+    const el = hitsScrollRef.current;
+    if (!el || hitsBusyRef.current) return;
+    const edges = readEdges(el);
+    const view = hitsViewRef.current;
+    if (view.abovePages.length > 0 && edges.distUp < HITS_SCROLL_EDGE) {
+      void loadHitsRef.current("newer");
+      return;
+    }
+    if ((view.hasMore || view.belowCount > 0) && edges.distDown < HITS_SCROLL_EDGE) {
+      void loadHitsRef.current("older");
+    }
+  }, []);
+
+  const onSpacerDelta = useCallback((above: number, below: number) => {
+    if (above < 1 && below < 1) return;
+    setHitsView((current) => ({
+      ...current,
+      aboveHeight: current.aboveHeight + Math.max(0, above),
+      belowHeight: current.belowHeight + Math.max(0, below),
+    }));
+  }, []);
+
+  const releaseFarHits = useCallback(() => {
+    const hold = hitsHoldRef.current;
+    const toolbar = hitsToolbarRef.current;
+    const active = document.activeElement;
+    const filtering = Boolean(toolbar && active instanceof Node && toolbar.contains(active));
+    if (hitsBusyRef.current || hold.pointerDown || hold.hover || hold.lightbox || filtering) {
+      hold.lastActive = Date.now();
+      return;
+    }
+    if (Date.now() - hold.lastActive < HITS_IDLE_MS) return;
+    const scroller = hitsScrollRef.current;
+    const view = hitsViewRef.current;
+    if (!scroller || view.items.length === 0) return;
+    const cards = hitCards(scroller);
+    if (cards.length === 0 || cards.some((card) => hitBubblePlaying(card))) return;
+    const { start, end } = keepDomRange(cards, scroller);
+    const outside = start + (cards.length - 1 - end);
+    if (outside < HITS_RELEASE_MIN) return;
+    const keepIds = new Set<string>();
+    for (let index = start; index <= end; index += 1) {
+      const id = cards[index]?.dataset.hitId;
+      if (id) keepIds.add(id);
+    }
+    if (!keepIds.size) return;
+    const atTop = view.abovePages.length === 0 && scroller.scrollTop <= HITS_AT_TOP_PX;
+    const snapshot = view.items;
+    const released = releaseOutside(view, keepIds, atTop);
+    if (!released || sameItemIds(released.view.items, snapshot)) return;
+    const anchor = anchorCard(scroller);
+    if (!anchor) return;
+    const token = (pinTokenRef.current += 1);
+    scrollPinRef.current = {
+      mode: "release",
+      token,
+      id: anchor.id,
+      top: anchor.top,
+      offset: contentOffset(scroller, anchor.node),
+      scrollHeight: scroller.scrollHeight,
+      nextCount: released.view.items.length,
+      measured: false,
+      aboveAdd: 0,
+      belowAdd: 0,
+      baseAbove: view.aboveHeight,
+      baseBelow: view.belowHeight,
+    };
+    suppressEdgeRef.current = true;
+    hold.lastActive = Date.now();
+    setHitsView((current) => {
+      if (!sameItemIds(current.items, snapshot)) {
+        if (scrollPinRef.current?.mode === "release" && scrollPinRef.current.token === token) scrollPinRef.current = null;
+        suppressEdgeRef.current = false;
+        return current;
+      }
+      const again = releaseOutside(current, keepIds, atTop);
+      if (!again) {
+        if (scrollPinRef.current?.mode === "release" && scrollPinRef.current.token === token) scrollPinRef.current = null;
+        suppressEdgeRef.current = false;
+        return current;
+      }
+      if (again.olderCursor) {
+        hitsCursorRef.current = again.olderCursor;
+        hitsHasMoreRef.current = true;
+      }
+      const pin = scrollPinRef.current;
+      if (pin?.mode === "release" && pin.token === token) {
+        pin.nextCount = again.view.items.length;
+        pin.baseAbove = current.aboveHeight;
+        pin.baseBelow = current.belowHeight;
+      }
+      return again.view;
+    });
+  }, []);
+
+  useEffect(() => {
+    const timer = window.setInterval(() => releaseFarHits(), 500);
+    return () => window.clearInterval(timer);
+  }, [releaseFarHits]);
+
+  useEffect(() => {
+    const up = () => {
+      if (!hitsHoldRef.current.pointerDown) return;
+      hitsHoldRef.current.pointerDown = false;
+      hitsHoldRef.current.lastActive = Date.now();
+    };
+    window.addEventListener("pointerup", up);
+    window.addEventListener("pointercancel", up);
+    return () => {
+      window.removeEventListener("pointerup", up);
+      window.removeEventListener("pointercancel", up);
+    };
   }, []);
 
   const categories = useMemo(() => {
@@ -856,29 +1173,14 @@ export default function StagePage({ taskPanel }: { taskPanel: ReactNode }) {
         map.set(item.category, categoryLabel(tags, item.category));
       }
     }
+    for (const [key, label] of map) {
+      if (!tags.some((tag) => tag.key === key)) seenCategoriesRef.current.set(key, label);
+    }
+    for (const [key, label] of seenCategoriesRef.current) {
+      if (!map.has(key)) map.set(key, label);
+    }
     return [...map.entries()];
   }, [hitsView.items, tags]);
-
-  function landHit(flight: Flight) {
-    if (landedIds.current.has(flight.id)) return;
-    landedIds.current.add(flight.id);
-    setFlights((current) => current.filter((item) => item.id !== flight.id));
-    if (flight.kind !== "hit" || !flight.hit) return;
-    flyingCount.current = Math.max(0, flyingCount.current - 1);
-    setImpact((value) => value + 1);
-    placeResults([flight.hit]);
-    const next = pendingHits.current.shift();
-    if (!next) return;
-    const from = aiCoreRef.current?.getBoundingClientRect();
-    if (!from) {
-      const rest = pendingHits.current.splice(0);
-      placeResults([next, ...rest]);
-      return;
-    }
-    flyingCount.current += 1;
-    const to = resultsRef.current?.getBoundingClientRect();
-    setFlights((current) => [...current, { id: next.id, kind: "hit", hit: next, from, to }]);
-  }
 
   const workers = stage?.workers ?? [];
   const concurrency = clampConcurrency(stage?.concurrency ?? (workers.length || CONCURRENCY_DEFAULT));
@@ -1036,13 +1338,27 @@ export default function StagePage({ taskPanel }: { taskPanel: ReactNode }) {
         </div>
         </div>
 
-        <aside ref={resultsRef} className="holo-frame well-frame console-hits" aria-labelledby="results-heading">
-          {impact > 0 && !reduceMotion ? <div key={impact} className="well-flash" /> : null}
+        <aside
+          className="holo-frame well-frame console-hits"
+          aria-labelledby="results-heading"
+          onPointerEnter={() => {
+            hitsHoldRef.current.hover = true;
+            hitsHoldRef.current.lastActive = Date.now();
+          }}
+          onPointerLeave={() => {
+            hitsHoldRef.current.hover = false;
+            hitsHoldRef.current.lastActive = Date.now();
+          }}
+          onPointerDown={() => {
+            hitsHoldRef.current.pointerDown = true;
+            hitsHoldRef.current.lastActive = Date.now();
+          }}
+        >
           <div className="column-head">
             <h2 id="results-heading">{m.stage.results}</h2>
             <span className="count-badge">{hitsLoading && hitsView.items.length === 0 ? "…" : hitsView.total}</span>
           </div>
-          <div className="hits-toolbar" role="search" aria-label={m.stage.filterAria}>
+          <div ref={hitsToolbarRef} className="hits-toolbar" role="search" aria-label={m.stage.filterAria}>
             <SearchBox
               label={m.stage.searchLabel}
               placeholder={m.stage.searchPlaceholder}
@@ -1095,13 +1411,20 @@ export default function StagePage({ taskPanel }: { taskPanel: ReactNode }) {
           </div>
           <HitsPane
             items={hitsView.items}
+            aboveHeight={hitsView.aboveHeight}
+            belowHeight={hitsView.belowHeight}
             loading={hitsLoading}
             loadingMore={hitsLoadingMore}
-            freshIds={freshIds}
+            loadingNewer={hitsLoadingNewer}
+            birthIds={birthIds}
             tags={tags}
             locale={locale}
             scrollRef={hitsScrollRef}
             onScroll={onHitsScroll}
+            holdRef={hitsHoldRef}
+            scrollPinRef={scrollPinRef}
+            pinAdjustingRef={pinAdjustingRef}
+            onSpacerDelta={onSpacerDelta}
           />
         </aside>
       </div>
@@ -1121,31 +1444,9 @@ export default function StagePage({ taskPanel }: { taskPanel: ReactNode }) {
             <p className="font-mono text-xs text-cyan">{m.stage.queued(item.messageCount)}</p>
           </motion.div>
         ))}
-        {flights.map((flight) =>
-          flight.kind === "hit" && flight.hit ? (
-            <motion.div
-              key={`hit-${flight.id}`}
-              className="hit-packet pointer-events-none fixed top-0 left-0 z-50 w-52 rounded-lg border border-lime/40 bg-raised/95 p-2.5"
-              initial={{ x: flight.from.left + flight.from.width / 2 - 104, y: flight.from.top, opacity: 1, scale: 0.96 }}
-              animate={{
-                x: (flight.to?.left ?? flight.from.left) + 12,
-                y: (flight.to?.top ?? flight.from.top) + 36,
-                opacity: 1,
-                scale: 1,
-              }}
-              exit={{ opacity: 0, transition: { type: "tween", duration: 0.08, ease: "easeOut" } }}
-              transition={HIT_FLY}
-              onAnimationComplete={() => landHit(flight)}
-            >
-              <p className="text-[11px] text-lime">{m.stage.hit}</p>
-              <p className="truncate text-sm font-medium">{flight.hit.taskName}</p>
-              <p className="truncate text-xs text-slate-300">{flight.hit.content || m.stage.noText}</p>
-              <p className="font-mono text-xs">noul {pct(flight.hit.noul)}</p>
-            </motion.div>
-          ) : flight.kind === "miss" && flight.batch ? (
-            <MissBurst key={`miss-${flight.id}`} flight={flight} onDone={() => setFlights((current) => current.filter((item) => item.id !== flight.id))} />
-          ) : null,
-        )}
+        {flights.map((flight) => (
+          <MissBurst key={`miss-${flight.id}`} flight={flight} onDone={() => setFlights((current) => current.filter((item) => item.id !== flight.id))} />
+        ))}
       </AnimatePresence>
     </div>
   );
@@ -1351,26 +1652,47 @@ function HitLightbox({
   );
 }
 
+function wantsReducedMotion(hookValue: boolean | null) {
+  if (hookValue === true) return true;
+  return typeof window !== "undefined" && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+}
+
 const ResultCard = memo(function ResultCard({
   hit,
-  fresh,
+  bornDelayMs,
   categoryText,
   locale,
   onOpenImage,
 }: {
   hit: HitExtract;
-  fresh: boolean;
+  bornDelayMs: number | null;
   categoryText: string;
   locale: Locale;
   onOpenImage: (urls: string[], index: number, label: string, trigger: HTMLElement) => void;
 }) {
+  const reduceMotion = useReducedMotion();
+  const bornDelay = useRef<number | null | undefined>(undefined);
+  if (bornDelay.current === undefined) {
+    bornDelay.current = bornDelayMs != null && !wantsReducedMotion(reduceMotion) ? bornDelayMs : null;
+  }
+  const [popDone, setPopDone] = useState(false);
+  const popDelay = bornDelay.current;
+  const showPop = popDelay != null && !popDone;
   const m = messages[locale];
   const images = hit.images ?? [];
   const sender = hit.senderName || m.stage.unknownSender;
   const title = hit.taskName || m.stage.taskFallback;
   const titleColor = taskTone(hit.taskId, hit.taskName);
   return (
-    <article className={`result-card${fresh ? " is-fresh" : ""}`}>
+    <article
+      data-hit-id={hit.id}
+      className={showPop ? "result-card is-born" : "result-card"}
+      style={showPop ? { animationDelay: `${popDelay}ms` } : undefined}
+      onAnimationEnd={(event) => {
+        if (event.animationName !== "hit-bubble" || event.elapsedTime < 0.3) return;
+        setPopDone(true);
+      }}
+    >
       {images.length ? (
         <div className="hit-media">
           {images.map((image, index) => (
@@ -1410,22 +1732,36 @@ const ResultCard = memo(function ResultCard({
 
 const HitsPane = memo(function HitsPane({
   items,
+  aboveHeight,
+  belowHeight,
   loading,
   loadingMore,
-  freshIds,
+  loadingNewer,
+  birthIds,
   tags,
   locale,
   scrollRef,
   onScroll,
+  holdRef,
+  scrollPinRef,
+  pinAdjustingRef,
+  onSpacerDelta,
 }: {
   items: HitExtract[];
+  aboveHeight: number;
+  belowHeight: number;
   loading: boolean;
   loadingMore: boolean;
-  freshIds: Record<string, number>;
+  loadingNewer: boolean;
+  birthIds: readonly string[];
   tags: Tag[];
   locale: Locale;
   scrollRef: MutableRefObject<HTMLDivElement | null>;
   onScroll: () => void;
+  holdRef: MutableRefObject<HitsHold>;
+  scrollPinRef: MutableRefObject<ScrollPin | null>;
+  pinAdjustingRef: MutableRefObject<boolean>;
+  onSpacerDelta: (above: number, below: number) => void;
 }) {
   const m = messages[locale];
   const groups = useMemo(() => groupHitsByMessageDay(items), [items]);
@@ -1449,6 +1785,10 @@ const HitsPane = memo(function HitsPane({
     setPreview((current) => (current ? { ...current, index } : current));
   }, []);
   useEffect(() => {
+    holdRef.current.lightbox = preview != null;
+    holdRef.current.lastActive = Date.now();
+  }, [preview, holdRef]);
+  useEffect(() => {
     const current = new Date(dayClock);
     const nextMidnight = new Date(current.getFullYear(), current.getMonth(), current.getDate() + 1, 0, 0, 1);
     const timer = window.setTimeout(() => setDayClock(Date.now()), Math.max(1000, nextMidnight.getTime() - Date.now()));
@@ -1463,6 +1803,44 @@ const HitsPane = memo(function HitsPane({
       lastWidth = host.clientWidth;
     };
     pack();
+    const pin = scrollPinRef.current;
+    if (pin?.mode === "pin") {
+      if (!pin.done) {
+        pin.done = true;
+        const node = host.querySelector<HTMLElement>(`[data-hit-id="${CSS.escape(pin.id)}"]`);
+        if (node) {
+          const delta = node.getBoundingClientRect().top - pin.top;
+          if (Math.abs(delta) > 0.5) {
+            pinAdjustingRef.current = true;
+            host.scrollTop += delta;
+            pinAdjustingRef.current = false;
+          }
+        }
+        scrollPinRef.current = null;
+      }
+    } else if (pin?.mode === "release") {
+      const count = host.querySelectorAll(".result-card").length;
+      const node = host.querySelector<HTMLElement>(`[data-hit-id="${CSS.escape(pin.id)}"]`);
+      if (count === pin.nextCount && node) {
+        if (!pin.measured) {
+          const aboveRemoved = pin.offset - contentOffset(host, node);
+          const shrink = pin.scrollHeight - host.scrollHeight;
+          pin.aboveAdd = Math.round(Math.max(0, aboveRemoved));
+          pin.belowAdd = Math.round(Math.max(0, shrink - Math.max(0, aboveRemoved)));
+          pin.measured = true;
+          if (pin.aboveAdd >= 1 || pin.belowAdd >= 1) onSpacerDelta(pin.aboveAdd, pin.belowAdd);
+          else scrollPinRef.current = null;
+        } else if (aboveHeight + 0.5 >= pin.baseAbove + pin.aboveAdd && belowHeight + 0.5 >= pin.baseBelow + pin.belowAdd) {
+          const delta = node.getBoundingClientRect().top - pin.top;
+          if (Math.abs(delta) > 0.5) {
+            pinAdjustingRef.current = true;
+            host.scrollTop += delta;
+            pinAdjustingRef.current = false;
+          }
+          scrollPinRef.current = null;
+        }
+      }
+    }
     const observer = new ResizeObserver(() => {
       if (Math.abs(host.clientWidth - lastWidth) < 1) return;
       pack();
@@ -1478,11 +1856,13 @@ const HitsPane = memo(function HitsPane({
       cancelFonts = true;
       observer.disconnect();
     };
-  }, [items, locale, scrollRef]);
+  }, [items, aboveHeight, belowHeight, locale, scrollRef, scrollPinRef, pinAdjustingRef, onSpacerDelta]);
   const now = new Date(dayClock);
+  const birthSet = useMemo(() => new Set(birthIds), [birthIds]);
+  let bornOrdinal = 0;
   return (
     <>
-      <div ref={scrollRef} className="column-scroll hits-scroll" onScroll={onScroll}>
+      <div ref={scrollRef} className="column-scroll hits-scroll" aria-busy={loadingNewer || loadingMore || undefined} onScroll={onScroll}>
         {items.length === 0 ? (
           loading ? (
             <p className="hit-more" role="status">
@@ -1493,30 +1873,39 @@ const HitsPane = memo(function HitsPane({
           )
         ) : (
           <div className="hit-days">
+            {aboveHeight > 0 ? <div className="hit-spacer hit-spacer-above" style={{ height: aboveHeight }} /> : null}
             {groups.map((group) => {
               const label = dayChipLabel(group.key, locale, m.stage.dayToday, m.stage.dayYesterday, now);
               return (
-                <section key={group.key || "undated"} className="hit-day">
+                <section key={group.key || "undated"} className="hit-day" data-day={group.key || "undated"}>
                   {label ? (
                     <p className="hit-day-chip">
                       <span>{label}</span>
                     </p>
                   ) : null}
                   <div className="hit-grid">
-                    {group.items.map((item) => (
-                      <ResultCard
-                        key={item.id}
-                        hit={item}
-                        fresh={freshIds[item.id] != null}
-                        categoryText={categoryLabel(tags, item.category)}
-                        locale={locale}
-                        onOpenImage={openHitImage}
-                      />
-                    ))}
+                    {group.items.map((item) => {
+                      let bornDelayMs: number | null = null;
+                      if (birthSet.has(item.id)) {
+                        bornDelayMs = Math.min(bornOrdinal * HIT_POP_STAGGER_MS, HIT_POP_STAGGER_CAP_MS);
+                        bornOrdinal += 1;
+                      }
+                      return (
+                        <ResultCard
+                          key={item.id}
+                          hit={item}
+                          bornDelayMs={bornDelayMs}
+                          categoryText={categoryLabel(tags, item.category)}
+                          locale={locale}
+                          onOpenImage={openHitImage}
+                        />
+                      );
+                    })}
                   </div>
                 </section>
               );
             })}
+            {belowHeight > 0 ? <div className="hit-spacer hit-spacer-below" style={{ height: belowHeight }} /> : null}
           </div>
         )}
         {loadingMore ? (
