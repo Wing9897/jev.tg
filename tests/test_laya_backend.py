@@ -1,13 +1,14 @@
-"""Jev / Laya backend switch. The Laya package and weights stay mocked."""
+"""Jev / Laya backend switch. Ollama HTTP stays mocked; weights are never downloaded."""
 
 from __future__ import annotations
 
 import asyncio
-import sys
+import json
 import tempfile
+import threading
 import time
-import types
 import unittest
+import urllib.error
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, patch
@@ -16,13 +17,14 @@ from server.batches import create_task, latest_error_batch
 from server.billing import list_usage, record_call, serialize_row, summary
 from server.db import Database
 from server.laya import (
-    LAYA_CHECKPOINT,
+    OLLAMA_BASE_URL,
+    OLLAMA_DOWN,
+    OLLAMA_LAYA_MODEL,
     LayaError,
     category_question,
     judge_laya_batch,
     message_state,
     noul_from_laya_answer,
-    reset_agent,
 )
 from server.settings_store import SettingsStore, live_worker_count, parse_analysis_backend
 from server.sse import SseBroadcaster
@@ -91,64 +93,21 @@ class NoulMappingTests(unittest.TestCase):
 
 
 class LayaCallTests(unittest.TestCase):
-    def tearDown(self) -> None:
-        reset_agent()
+    def test_user_path_is_the_official_ollama_tag(self) -> None:
+        self.assertEqual(OLLAMA_LAYA_MODEL, "laya")
+        self.assertEqual(OLLAMA_BASE_URL, "http://127.0.0.1:11434")
+        self.assertNotIn("multilingual", OLLAMA_LAYA_MODEL)
 
-    def test_checkpoint_is_multilingual(self) -> None:
-        self.assertEqual(LAYA_CHECKPOINT, "convaiinnovations/laya-multilingual")
-        self.assertNotEqual(LAYA_CHECKPOINT, "convaiinnovations/laya")
-
-    def test_loader_calls_official_load(self) -> None:
-        from server import laya as laya_mod
-
-        reset_agent()
-        seen: list[tuple[Any, ...]] = []
-        fake = types.ModuleType("laya")
-
-        def load(model_id: str, *args: Any, **kwargs: Any) -> object:
-            seen.append((model_id, args, kwargs.get("subfolder")))
-            return object()
-
-        fake.load = load
-        previous = sys.modules.get("laya")
-        sys.modules["laya"] = fake
-        try:
-            laya_mod._load_agent()
-            self.assertEqual(seen, [("convaiinnovations/laya-multilingual", (), None)])
-        finally:
-            reset_agent()
-            if previous is None:
-                sys.modules.pop("laya", None)
-            else:
-                sys.modules["laya"] = previous
-
-    def test_missing_package_is_a_clear_error(self) -> None:
-        from server import laya as laya_mod
-
-        reset_agent()
-        previous = sys.modules.get("laya")
-        sys.modules["laya"] = None  # type: ignore[assignment]
-        try:
-            with self.assertRaises(LayaError) as caught:
-                laya_mod._load_agent()
-            self.assertIn("uv sync --extra laya", str(caught.exception))
-        finally:
-            reset_agent()
-            if previous is None:
-                sys.modules.pop("laya", None)
-            else:
-                sys.modules["laya"] = previous
-
-    def test_predict_skips_images_and_typesafe(self) -> None:
+    def test_ollama_skips_images_and_typesafe(self) -> None:
         async def run() -> None:
-            calls: list[tuple[dict[str, Any], dict[str, Any]]] = []
+            calls: list[dict[str, Any]] = []
 
-            class Agent:
-                def predict(self, state: dict[str, Any], questions: dict[str, Any]) -> dict[str, Any]:
-                    calls.append((state, questions))
-                    if "category" in questions:
-                        return {"answers": {"category": {"type": "choice", "choice": "market", "confidence": 0.4}}}
-                    return {"answers": {"hit": {"type": "noul", "noul": 0.81}}}
+            def post(payload: dict[str, Any]) -> dict[str, Any]:
+                calls.append(payload)
+                questions = payload["questions"]
+                if "category" in questions:
+                    return {"answers": {"category": {"type": "choice", "choice": "market", "confidence": 0.4}}}
+                return {"answers": {"hit": {"type": "noul", "noul": 0.81}}}
 
             message = {
                 "id": "m1",
@@ -158,7 +117,7 @@ class LayaCallTests(unittest.TestCase):
                 "timestamp": "2026-09-23T00:00:00Z",
                 "images": [{"data": "jpeg-bytes"}],
             }
-            with patch("server.laya._load_agent", return_value=Agent()), patch(
+            with patch("server.laya._post_systemone", post), patch(
                 "server.jev.AsyncTypeSafeClient",
                 side_effect=AssertionError("TypeSafe"),
             ):
@@ -171,43 +130,86 @@ class LayaCallTests(unittest.TestCase):
             self.assertEqual(judged["category"], "market")
             self.assertEqual(judged["tokens"], 0)
             self.assertEqual(judged["usage_meta"]["backend"], "laya")
+            self.assertEqual(judged["usage_meta"]["model"], "laya")
+            self.assertEqual(judged["usage_meta"]["input_tokens"], 0)
             self.assertIsNone(judged["usage_meta"]["cost_usd"])
-            hit_state, hit_questions = calls[0]
-            self.assertEqual(set(hit_state), {"text", "chat", "sender", "time"})
-            self.assertNotIn("images", hit_state)
-            self.assertEqual(hit_questions["hit"]["instructions"], "找晶片")
-            self.assertEqual(hit_questions["hit"]["type"], "noul")
-            self.assertIn("other", calls[1][1]["category"]["criteria"])
-            self.assertEqual(message_state(message).keys(), hit_state.keys())
+            hit = calls[0]
+            self.assertEqual(hit["model"], "laya")
+            self.assertEqual(set(hit["state"]), {"text", "chat", "sender", "time"})
+            self.assertNotIn("images", hit["state"])
+            self.assertEqual(hit["questions"]["hit"]["instructions"], "找晶片")
+            self.assertEqual(hit["questions"]["hit"]["type"], "noul")
+            self.assertIn("other", calls[1]["questions"]["category"]["criteria"])
+            self.assertEqual(message_state(message).keys(), hit["state"].keys())
 
         asyncio.run(run())
 
-    def test_in_flight_inferences_stay_at_one(self) -> None:
+    def test_ollama_requests_may_overlap(self) -> None:
         async def run() -> None:
-            from server import laya as laya_mod
-
             current = 0
             peak = 0
+            gate = threading.Lock()
 
-            class Agent:
-                def predict(self, state: dict[str, Any], questions: dict[str, Any]) -> dict[str, Any]:
-                    nonlocal current, peak
+            def post(payload: dict[str, Any]) -> dict[str, Any]:
+                nonlocal current, peak
+                with gate:
                     current += 1
                     peak = max(peak, current)
-                    time.sleep(0.05)
+                time.sleep(0.05)
+                with gate:
                     current -= 1
-                    return {"answers": {"hit": {"type": "noul", "noul": 0.2}}}
+                self.assertEqual(payload["model"], "laya")
+                return {"answers": {"hit": {"type": "noul", "noul": 0.2}}}
 
-            laya_mod._agent = Agent()
             message = {"id": "m", "content": "你好", "chat_name": "c", "sender_name": "s", "timestamp": "t"}
-            await asyncio.gather(
-                judge_laya_batch(task_prompt="相關嗎", messages=[message], categories=[]),
-                judge_laya_batch(task_prompt="相關嗎", messages=[message], categories=[]),
-            )
-            self.assertEqual(peak, 1)
+            with patch("server.laya._post_systemone", post):
+                await asyncio.gather(
+                    judge_laya_batch(task_prompt="相關嗎", messages=[message], categories=[]),
+                    judge_laya_batch(task_prompt="相關嗎", messages=[message], categories=[]),
+                )
+            self.assertEqual(peak, 2)
             self.assertIsNone(category_question([]))
 
         asyncio.run(run())
+
+    def test_connection_refused_asks_to_start_ollama(self) -> None:
+        from server import laya as laya_mod
+
+        def boom(*_args: Any, **_kwargs: Any) -> None:
+            raise urllib.error.URLError(ConnectionRefusedError(10061, "refused"))
+
+        with patch("server.laya.urllib.request.urlopen", boom):
+            with self.assertRaises(LayaError) as caught:
+                laya_mod._post_systemone({"model": "laya", "state": "hi", "questions": {}})
+        text = str(caught.exception)
+        self.assertEqual(text, OLLAMA_DOWN)
+        self.assertIn("啟動 Ollama", text)
+        self.assertNotIn("Traceback", text)
+        self.assertNotIn("uv sync", text)
+        self.assertNotIn("refused", text)
+
+    def test_missing_model_asks_for_pull(self) -> None:
+        from email.message import Message
+        from io import BytesIO
+
+        from server import laya as laya_mod
+
+        def boom(*_args: Any, **_kwargs: Any) -> None:
+            body = BytesIO(json.dumps({"error": "model 'laya' not found"}).encode())
+            raise urllib.error.HTTPError(
+                "http://127.0.0.1:11434/v1/systemone",
+                404,
+                "Not Found",
+                Message(),
+                body,
+            )
+
+        with patch("server.laya.urllib.request.urlopen", boom):
+            with self.assertRaises(LayaError) as caught:
+                laya_mod._post_systemone({"model": "laya", "state": "hi", "questions": {}})
+        text = str(caught.exception)
+        self.assertIn("ollama pull laya", text)
+        self.assertNotIn("Traceback", text)
 
 
 class BillingLabelTests(unittest.TestCase):
@@ -216,7 +218,7 @@ class BillingLabelTests(unittest.TestCase):
             {
                 "id": "1",
                 "created_at": "2026-09-23T00:00:00Z",
-                "model": LAYA_CHECKPOINT,
+                "model": "laya",
                 "backend": "laya",
                 "input_tokens": 0,
                 "output_tokens": 0,
@@ -224,7 +226,7 @@ class BillingLabelTests(unittest.TestCase):
                 "cost_source": "laya",
                 "success": 1,
             },
-            input_rate=0.42,
+            input_rate=0.042,
             output_rate=0,
         )
         self.assertEqual(laya["backend"], "laya")
@@ -243,17 +245,14 @@ class BillingLabelTests(unittest.TestCase):
                 "cost_source": "estimate",
                 "success": 1,
             },
-            input_rate=0.42,
+            input_rate=0.042,
             output_rate=0,
         )
         self.assertEqual(jev["usd_kind"], "estimate")
-        self.assertAlmostEqual(jev["spend_usd"], 0.42)
+        self.assertAlmostEqual(jev["spend_usd"], 0.042)
 
 
 class WorkerBranchTests(unittest.TestCase):
-    def tearDown(self) -> None:
-        reset_agent()
-
     def test_laya_path_does_not_call_typesafe(self) -> None:
         asyncio.run(self._run_laya_success())
 
@@ -267,27 +266,26 @@ class WorkerBranchTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             database, settings, batch = await _seed_batch(folder, backend="laya")
             typesafe = AsyncMock(side_effect=AssertionError("TypeSafe"))
-            loaded: list[str] = []
+            seen: list[str] = []
 
-            class Agent:
-                def predict(self, state: dict[str, Any], questions: dict[str, Any]) -> dict[str, Any]:
-                    return {"answers": {"hit": {"type": "noul", "noul": 0.2}}}
-
-            def load_agent() -> Agent:
-                loaded.append("load")
-                return Agent()
+            def post(payload: dict[str, Any]) -> dict[str, Any]:
+                seen.append(str(payload["model"]))
+                return {"answers": {"hit": {"type": "noul", "noul": 0.2}}}
 
             try:
-                with patch("server.workers.judge_batch", typesafe), patch("server.laya._load_agent", load_agent):
+                with patch("server.workers.judge_batch", typesafe), patch("server.laya._post_systemone", post):
                     await _process(database, settings, batch)
                 typesafe.assert_not_called()
-                self.assertEqual(loaded, ["load"])
+                self.assertEqual(seen, ["laya"])
                 stored = await database.fetch_one("SELECT status, noul FROM analysis_batches WHERE id = 'b1'")
                 assert stored is not None
                 self.assertEqual(stored["status"], "miss")
-                ledger = await database.fetch_one("SELECT backend, cost_source, cost_usd, input_tokens FROM billing_usage")
+                ledger = await database.fetch_one(
+                    "SELECT backend, model, cost_source, cost_usd, input_tokens FROM billing_usage"
+                )
                 assert ledger is not None
                 self.assertEqual(ledger["backend"], "laya")
+                self.assertEqual(ledger["model"], "laya")
                 self.assertEqual(ledger["cost_source"], "laya")
                 self.assertIsNone(ledger["cost_usd"])
                 self.assertEqual(ledger["input_tokens"], 0)
@@ -311,12 +309,12 @@ class WorkerBranchTests(unittest.TestCase):
                     "raw": {"model": "jev-1.13.0"},
                 }
 
-            def load_agent() -> None:
-                loaded.append("load")
-                raise AssertionError("Laya loaded")
+            def post(_payload: dict[str, Any]) -> None:
+                loaded.append("ollama")
+                raise AssertionError("Ollama")
 
             try:
-                with patch("server.workers.judge_batch", judge_batch), patch("server.laya._load_agent", load_agent):
+                with patch("server.workers.judge_batch", judge_batch), patch("server.laya._post_systemone", post):
                     await _process(database, settings, batch)
                 self.assertEqual(loaded, [])
                 ledger = await database.fetch_one("SELECT backend, model, input_tokens, cost_source FROM billing_usage")
@@ -333,14 +331,14 @@ class WorkerBranchTests(unittest.TestCase):
             database, settings, batch = await _seed_batch(folder, backend="laya")
             attempts = 0
 
-            def load_agent() -> None:
+            def post(_payload: dict[str, Any]) -> None:
                 nonlocal attempts
                 attempts += 1
-                raise LayaError("weights missing")
+                raise LayaError(OLLAMA_DOWN)
 
             try:
                 with patch("server.workers.judge_batch", AsyncMock(side_effect=AssertionError("TypeSafe"))), patch(
-                    "server.laya._load_agent", load_agent
+                    "server.laya._post_systemone", post
                 ):
                     await _process(database, settings, batch)
                 self.assertEqual(attempts, 1)
@@ -349,7 +347,9 @@ class WorkerBranchTests(unittest.TestCase):
                 stored = await database.fetch_one("SELECT status, error_message FROM analysis_batches WHERE id = 'b1'")
                 assert stored is not None
                 self.assertEqual(stored["status"], "error")
-                self.assertIn("weights missing", str(stored["error_message"]))
+                self.assertIn("啟動 Ollama", str(stored["error_message"]))
+                self.assertNotIn("Traceback", str(stored["error_message"]))
+                self.assertNotIn("uv sync", str(stored["error_message"]))
                 recent = await latest_error_batch(database)
                 assert recent is not None
                 self.assertEqual(recent["id"], "b1")
@@ -408,11 +408,11 @@ class RecordCallTests(unittest.TestCase):
                         settings,
                         task_id=None,
                         batch_id=None,
-                        model=LAYA_CHECKPOINT,
+                        model="laya",
                         success=True,
                         meta={
                             "backend": "laya",
-                            "model": LAYA_CHECKPOINT,
+                            "model": "laya",
                             "input_tokens": 80,
                             "output_tokens": 0,
                             "cost_usd": 1.25,
@@ -463,14 +463,14 @@ class LedgerSplitTests(unittest.TestCase):
                         settings,
                         task_id=None,
                         batch_id=None,
-                        model=LAYA_CHECKPOINT,
+                        model="laya",
                         success=True,
-                        meta={"backend": "laya", "model": LAYA_CHECKPOINT, "input_tokens": 80, "cost_usd": 3},
+                        meta={"backend": "laya", "model": "laya", "input_tokens": 80, "cost_usd": 3},
                     )
                     jev_summary = await summary(database, settings, backend="jev")
                     laya_summary = await summary(database, settings, backend="laya")
                     self.assertEqual(jev_summary["all_time"]["calls"], 1)
-                    self.assertAlmostEqual(jev_summary["all_time"]["usd"], 0.42)
+                    self.assertAlmostEqual(jev_summary["all_time"]["usd"], 0.042)
                     self.assertEqual(jev_summary["all_time"]["tokens"], 1_000_000)
                     self.assertEqual(jev_summary["last_credits_remaining"], 12.5)
                     self.assertEqual(laya_summary["all_time"]["calls"], 1)

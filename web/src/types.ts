@@ -168,7 +168,6 @@ export interface StageSnapshot {
   workers: WorkerState[];
   concurrency: number;
   queue: BatchResult[];
-  results: HitExtract[];
   activeTasks: number;
   jevCalls: number;
   jevHits: number;

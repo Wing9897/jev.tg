@@ -1,9 +1,9 @@
 """Queue filler and one worker slot per shared concurrency setting.
 
 The saved analysis backend chooses the judge. `_judge_jev` is a TypeSafe call
-per slot. `_judge_laya` may have that many batches in flight, but Laya loads
-one model and serializes inference on its own lock. Billing is recorded on
-each path; Laya meta never invents a Jev USD amount.
+per slot. `_judge_laya` may have that many Ollama requests in flight. Ollama
+may still run them one at a time; this process does not claim extra copies.
+Billing is recorded on each path; Laya meta never invents a Jev USD amount.
 """
 
 from __future__ import annotations
@@ -23,7 +23,7 @@ from typesafe_sdk import (
 
 from server import batches, billing
 from server.jev import batch_score, judge_batch
-from server.laya import LAYA_CHECKPOINT, judge_laya_batch, laya_billing_meta
+from server.laya import OLLAMA_LAYA_MODEL, judge_laya_batch, laya_billing_meta
 from server.settings_store import clamp_concurrency
 from server.sse import SseBroadcaster
 from server.tags import choice_tags
@@ -450,7 +450,7 @@ class WorkerPool:
                 self.settings,
                 task_id=str(batch["task_id"]),
                 batch_id=str(batch["id"]),
-                model=LAYA_CHECKPOINT,
+                model=OLLAMA_LAYA_MODEL,
                 success=False,
                 meta=laya_billing_meta(error=last_error),
             )
@@ -460,7 +460,7 @@ class WorkerPool:
             self.settings,
             task_id=str(batch["task_id"]),
             batch_id=str(batch["id"]),
-            model=LAYA_CHECKPOINT,
+            model=OLLAMA_LAYA_MODEL,
             success=True,
             meta=judged.get("usage_meta") or laya_billing_meta(),
         )

@@ -15,13 +15,9 @@ dependencies = [
     "pillow==11.1.0",
 ]
 
-# Optional local decision model. Not imported at startup.
-#   uv sync --extra laya
-# Checkpoint used by the app: convaiinnovations/laya-multilingual (laya==0.3.6).
 # Tray icon and PyInstaller. pytest does not install this extra.
 # pillow is already a core dependency. Launch: uv run --extra tray python -m server.tray
 [project.optional-dependencies]
-laya = ["laya==0.3.6"]
 tray = [
     "pystray==0.19.5",
     "pyinstaller==6.15.0",

@@ -405,7 +405,6 @@ async def get_stage(request: Request) -> dict[str, Any]:
             "workers": app.workers.snapshot(),
             "concurrency": live_worker_count(settings["analysis_backend"], settings["concurrency"]),
             "queue": await batches.list_queued(app.db),
-            "results": await batches.list_hits(app.db, limit=batches.HITS_PAGE_SIZE),
             "active_tasks": await batches.active_task_count(app.db),
             "jev_calls": settings["jev_calls"],
             "jev_hits": settings["jev_hits"],
@@ -416,7 +415,6 @@ async def get_stage(request: Request) -> dict[str, Any]:
             "typesafe_api_key_set": settings["typesafe_api_key_set"],
             "telegram_status": (await app.telegram.snapshot())["status"],
             "message_count": await batches.stored_message_count(app.db),
-            "recent_batch_error": await batches.latest_error_batch(app.db),
         }
     )
 

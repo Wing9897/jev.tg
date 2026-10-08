@@ -135,7 +135,7 @@ export function releaseOutside(
   let hasMore = view.hasMore;
   let olderCursor: string | null = null;
   let kept = middle;
-  if (suffix.length && middle.length) {
+  if (suffix.length) {
     const older = encodeHitCursor(middle[middle.length - 1]);
     if (older) {
       belowCount += suffix.length;
@@ -144,8 +144,6 @@ export function releaseOutside(
     } else {
       kept = [...middle, ...suffix];
     }
-  } else if (suffix.length) {
-    kept = [...middle, ...suffix];
   }
   if (kept.length === view.items.length) return null;
   return {

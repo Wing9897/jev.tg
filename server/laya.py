@@ -1,44 +1,37 @@
-"""Local Laya multilingual checkpoint. Lazy-loaded; never the English model.
+"""Laya through local Ollama. The app does not import the Python `laya` package.
 
-laya 0.3.6 (PyPI). Official call::
+Official model page (2026-10-08): https://ollama.com/library/laya
+Tag `laya` is Convai Innovations' decision model. Ollama serves it at
+``POST /v1/systemone`` with Jev's choice / score / noul questions. The library
+page's ``ollama pull laya`` tag is the one this process calls. Sibling
+checkpoints such as ``laya-multilingual`` are not that tag.
 
-    agent = laya.load("convaiinnovations/laya-multilingual")
-    result = agent.predict(state, questions)  # alias of Agent.system_one
-
-`predict` returns ``{"answers": {...}, "usage": {...}}``. A noul answer is
-``answers[id]["noul"]`` = P(true) in [0, 1]. A choice answer is
-``answers[id]["choice"]`` plus ``confidence``. Weights download inside
-``laya.load`` on first use (Hugging Face ``convaiinnovations/laya-multilingual``).
-
-The English checkpoint ``convaiinnovations/laya`` is not loaded. The Hub language
-list for this checkpoint includes ``zh``; published benchmarks report ``zh-CN``
-and ``zh-TW``.
+Default daemon: http://127.0.0.1:11434. This module never downloads weights.
+Hit images are not part of ``state``.
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
+import urllib.error
+import urllib.request
 from collections.abc import Mapping
 from typing import Any
 
 from server.jev import category_choice, scored_message
 
-# Standalone multilingual repo. Do not pass subfolder="multilingual" on the English bundle.
-LAYA_CHECKPOINT = "convaiinnovations/laya-multilingual"
-_CATEGORY_CHARS = 4_000
+# https://ollama.com/library/laya — official tag, not a user-typed name.
+OLLAMA_BASE_URL = "http://127.0.0.1:11434"
+OLLAMA_LAYA_MODEL = "laya"
+OLLAMA_TIMEOUT_SECONDS = 120
+OLLAMA_DOWN = "無法連上 Ollama。請先啟動 Ollama（http://127.0.0.1:11434）。"
 
-_agent: Any = None
-_infer_lock = asyncio.Lock()
+_CATEGORY_CHARS = 4_000
 
 
 class LayaError(RuntimeError):
     """One Laya batch failed. The worker records the error and does not retry it."""
-
-
-def reset_agent() -> None:
-    """Drop the cached agent. Tests use this so a mock cannot leak into another case."""
-    global _agent
-    _agent = None
 
 
 def noul_from_laya_answer(answer: Mapping[str, Any]) -> float:
@@ -70,7 +63,7 @@ def laya_billing_meta(*, error: str | None = None) -> dict[str, Any]:
     """Ledger marker for a local run: zero tokens and no TypeSafe USD."""
     meta: dict[str, Any] = {
         "backend": "laya",
-        "model": LAYA_CHECKPOINT,
+        "model": OLLAMA_LAYA_MODEL,
         "input_tokens": 0,
         "output_tokens": 0,
         "cost_usd": None,
@@ -92,7 +85,7 @@ def message_state(message: Mapping[str, Any]) -> dict[str, str]:
 
 
 def category_question(categories: list[dict[str, str]]) -> dict[str, Any] | None:
-    """Same criteria as the Jev Choice, as a plain dict for `agent.predict`."""
+    """Same criteria as the Jev Choice, as a plain dict for systemone."""
     choice = category_choice(categories)
     if choice is None:
         return None
@@ -103,27 +96,65 @@ def category_question(categories: list[dict[str, str]]) -> dict[str, Any] | None
     }
 
 
-def _load_agent() -> Any:
-    global _agent
-    if _agent is not None:
-        return _agent
+def _post_systemone(payload: dict[str, Any]) -> dict[str, Any]:
+    """One `/v1/systemone` call. Connection failures stay a short Chinese error."""
+    body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    request = urllib.request.Request(
+        f"{OLLAMA_BASE_URL}/v1/systemone",
+        data=body,
+        headers={"Content-Type": "application/json", "Accept": "application/json"},
+        method="POST",
+    )
     try:
-        import laya
-    except ImportError as exc:
-        raise LayaError(
-            "Laya 套件未安裝。請執行 uv sync --extra laya（laya==0.3.6）。"
-            "權重未下載也不會擋住伺服器啟動。"
-        ) from exc
+        with urllib.request.urlopen(request, timeout=OLLAMA_TIMEOUT_SECONDS) as response:
+            raw = response.read()
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")
+        raise LayaError(_http_failure(exc.code, detail)) from exc
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        raise LayaError(OLLAMA_DOWN) from exc
     try:
-        agent = laya.load(LAYA_CHECKPOINT)
-    except Exception as exc:
-        raise LayaError(f"無法載入 Laya 多語權重 {LAYA_CHECKPOINT}：{exc}") from exc
-    _agent = agent
-    return _agent
+        parsed = json.loads(raw.decode("utf-8"))
+    except (UnicodeError, json.JSONDecodeError) as exc:
+        raise LayaError("Ollama 沒有回傳 Laya 的 JSON。") from exc
+    if not isinstance(parsed, dict):
+        raise LayaError("Ollama 沒有回傳 Laya 的 answers。")
+    return parsed
 
 
-def _score_sync(
-    agent: Any,
+def _http_failure(status: int, body: str) -> str:
+    detail = _error_text(body)
+    lowered = detail.casefold()
+    if status == 404 and "model" in lowered and "not found" in lowered:
+        return "Ollama 還沒有 laya。請先執行 ollama pull laya，並確認 Ollama 已啟動。"
+    if status == 404:
+        return "這版 Ollama 沒有 /v1/systemone。請升級到 0.40.0 或更新後再試。"
+    if detail:
+        return f"Ollama 拒絕這次 Laya 請求（HTTP {status}）：{detail}"
+    return f"Ollama 拒絕這次 Laya 請求（HTTP {status}）。"
+
+
+def _error_text(body: str) -> str:
+    try:
+        parsed = json.loads(body)
+    except json.JSONDecodeError:
+        parsed = None
+    if isinstance(parsed, dict):
+        error = parsed.get("error")
+        if isinstance(error, str) and error.strip():
+            return " ".join(error.split())[:240]
+    return " ".join(body.split())[:240]
+
+
+def _answer_from(result: Mapping[str, Any], key: str) -> dict[str, Any]:
+    answers = result.get("answers")
+    answer = answers.get(key) if isinstance(answers, dict) else None
+    if not isinstance(answer, dict):
+        raise LayaError("Ollama 沒有回傳 Laya 的 answers。")
+    return answer
+
+
+def _score_ollama(
     task_prompt: str,
     messages: list[dict[str, Any]],
     categories: list[dict[str, str]],
@@ -132,15 +163,14 @@ def _score_sync(
     scored: list[dict[str, Any]] = []
     raw_answers: dict[str, Any] = {}
     for index, message in enumerate(messages, start=1):
-        state = message_state(message)
-        result = agent.predict(
-            state,
-            {"hit": {"type": "noul", "instructions": prompt}},
+        result = _post_systemone(
+            {
+                "model": OLLAMA_LAYA_MODEL,
+                "state": message_state(message),
+                "questions": {"hit": {"type": "noul", "instructions": prompt}},
+            }
         )
-        answers = result.get("answers") if isinstance(result, dict) else None
-        answer = answers.get("hit") if isinstance(answers, dict) else None
-        if not isinstance(answer, dict):
-            raise LayaError(f"Laya 未回傳訊息 {index} 的 noul")
+        answer = _answer_from(result, "hit")
         scored.append(scored_message(index, message, noul_from_laya_answer(answer)))
         raw_answers[f"m{index}"] = answer
 
@@ -148,10 +178,15 @@ def _score_sync(
     category_confidence = None
     question = category_question(categories)
     if question is not None:
-        result = agent.predict(_category_state(messages), {"category": question})
-        answers = result.get("answers") if isinstance(result, dict) else None
-        choice = answers.get("category") if isinstance(answers, dict) else None
-        if not isinstance(choice, dict) or not choice.get("choice"):
+        result = _post_systemone(
+            {
+                "model": OLLAMA_LAYA_MODEL,
+                "state": _category_state(messages),
+                "questions": {"category": question},
+            }
+        )
+        choice = _answer_from(result, "category")
+        if not choice.get("choice"):
             raise LayaError("Laya 未回傳類型 choice")
         category = str(choice.get("choice"))
         if choice.get("confidence") is not None:
@@ -164,7 +199,7 @@ def _score_sync(
         "category_confidence": category_confidence,
         "tokens": 0,
         "usage_meta": laya_billing_meta(),
-        "raw": {"backend": "laya", "model": LAYA_CHECKPOINT, "answers": raw_answers},
+        "raw": {"backend": "laya", "model": OLLAMA_LAYA_MODEL, "answers": raw_answers},
     }
 
 
@@ -174,10 +209,8 @@ async def judge_laya_batch(
     messages: list[dict[str, Any]],
     categories: list[dict[str, str]],
 ) -> dict[str, Any]:
-    """Score one batch on the single cached multilingual agent."""
-    async with _infer_lock:
-        agent = await asyncio.to_thread(_load_agent)
-        return await asyncio.to_thread(_score_sync, agent, task_prompt, messages, categories)
+    """Score one batch on local Ollama. Callers limit how many of these are in flight."""
+    return await asyncio.to_thread(_score_ollama, task_prompt, messages, categories)
 
 
 def _category_state(messages: list[dict[str, Any]]) -> dict[str, str]:

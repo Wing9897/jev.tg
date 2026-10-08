@@ -56,6 +56,9 @@ export type Messages = {
     telegram: string;
     settings: string;
     tags: string;
+    hitLayout: string;
+    layoutMasonry: string;
+    layoutAligned: string;
     batchFail: string;
     recentBatch: (message: string) => string;
     queue: string;
@@ -97,6 +100,8 @@ export type Messages = {
     dayToday: string;
     dayYesterday: string;
     hitNew: string;
+    jumpLatest: string;
+    jumpLatestNew: (count: string) => string;
     workerStatus: Record<"idle" | "packing" | "judging" | "done" | "error", string>;
   };
   tasks: {
@@ -339,6 +344,9 @@ const zhHant: Messages = {
     telegram: "Telegram",
     settings: "設定",
     tags: "標籤",
+    hitLayout: "命中排法",
+    layoutMasonry: "動態磚",
+    layoutAligned: "對齊",
     batchFail: "批次分析失敗",
     recentBatch: (message) => `最近批次錯誤：${message}`,
     queue: "佇列",
@@ -380,6 +388,8 @@ const zhHant: Messages = {
     dayToday: "今日",
     dayYesterday: "昨日",
     hitNew: "新",
+    jumpLatest: "回到最新",
+    jumpLatestNew: (count) => `${count} 則新訊息`,
     workerStatus: { idle: "閒置", packing: "打包中", judging: "判斷中", done: "完成", error: "重試中" },
   },
   tasks: {
@@ -515,12 +525,12 @@ const zhHant: Messages = {
     backend: "分析後端",
     backendJev: "Jev",
     backendLaya: "Laya",
-    layaHint: "本機多語模型。自訂決策未微調時接近亂猜。",
-    layaConcurrency: "同時幾批，模型本身只載一份、推論逐筆。",
+    layaHint: "經本機 Ollama 執行（模型 laya，官方權重為英文）。請先啟動 Ollama。",
+    layaConcurrency: "同時最多幾筆請求在途。Ollama 若一次只處理一題，這只是在途上限。",
     layaSpend: "本機 · 無費用",
     unsavedBackend: (name) => `尚未儲存。目前分析仍是 ${name}。`,
-    layaActive: "目前分析是 Laya。本機 · 無費用。",
-    savedLaya: "已儲存。分析改走 Laya。",
+    layaActive: "目前分析是 Laya，經本機 Ollama。本機 · 無費用。",
+    savedLaya: "已儲存。分析改走本機 Ollama 的 Laya。",
     concurrencyLegend: "並行",
     concurrencyHint: "同時幾路 API。",
     concurrencyTitle: "同時判斷的 asyncio 協程數，不是系統執行緒。舞台忙碌時以並行 n/m 表示。",
@@ -534,8 +544,8 @@ const zhHant: Messages = {
     hits: "命中",
     misses: "未命中",
     pricingTitle: "估計單價",
-    pricingTitleAttr: "官方 Usage 沒有 cost。未回傳成本時金額標為估計，預設輸入約 $0.42／百萬 token。",
-    pricingHint: "未回傳成本時標為估計。",
+    pricingTitleAttr: "官方 Usage 沒有 cost。未回傳成本時金額標為估計。Jev 1.13 公布輸入 $0.042／百萬 token，輸出免費。",
+    pricingHint: "未回傳成本時標為估計。官方輸入 $0.042／百萬 token，輸出免費。",
     inputRate: "輸入 USD / 百萬 tok",
     outputRate: "輸出 USD / 百萬 tok",
     lowThreshold: "低餘額門檻",
@@ -543,7 +553,7 @@ const zhHant: Messages = {
     clearKey: "清除 API Key",
     billingTitle: "用量",
     billingIntro: "每次呼叫一筆；餘額僅在 API 回傳時顯示。",
-    billingIntroLaya: "本機 · 無費用。",
+    billingIntroLaya: "本機 Ollama · 無費用。",
     insufficient: "TypeSafe 額度不足（HTTP 402）。",
     lowBalance: (credits) => `餘額已低於門檻${credits == null ? "" : `（剩餘 ${credits}）`}。`,
     loadingUsage: "載入用量…",
@@ -630,6 +640,9 @@ const zhHans: Messages = {
     telegram: "Telegram",
     settings: "设置",
     tags: "标签",
+    hitLayout: "命中排法",
+    layoutMasonry: "动态砖",
+    layoutAligned: "对齐",
     batchFail: "批次分析失败",
     recentBatch: (message) => `最近批次错误：${message}`,
     queue: "队列",
@@ -671,6 +684,8 @@ const zhHans: Messages = {
     dayToday: "今天",
     dayYesterday: "昨天",
     hitNew: "新",
+    jumpLatest: "回到最新",
+    jumpLatestNew: (count) => `${count} 条新消息`,
     workerStatus: { idle: "闲置", packing: "打包中", judging: "判断中", done: "完成", error: "重试中" },
   },
   tasks: {
@@ -806,12 +821,12 @@ const zhHans: Messages = {
     backend: "分析后端",
     backendJev: "Jev",
     backendLaya: "Laya",
-    layaHint: "本地多语模型。自定义决策未微调时接近乱猜。",
-    layaConcurrency: "同时几批，模型本身只载一份、推理逐笔。",
+    layaHint: "经本机 Ollama 执行（模型 laya，官方权重为英文）。请先启动 Ollama。",
+    layaConcurrency: "同时最多几笔请求在途。Ollama 若一次只处理一题，这只是在途上限。",
     layaSpend: "本机 · 无费用",
     unsavedBackend: (name) => `尚未保存。当前分析仍是 ${name}。`,
-    layaActive: "当前分析是 Laya。本机 · 无费用。",
-    savedLaya: "已保存。分析改走 Laya。",
+    layaActive: "当前分析是 Laya，经本机 Ollama。本机 · 无费用。",
+    savedLaya: "已保存。分析改走本机 Ollama 的 Laya。",
     concurrencyLegend: "并行",
     concurrencyHint: "同时几路 API。",
     concurrencyTitle: "同时判断的 asyncio 协程数，不是系统线程。舞台忙碌时以并行 n/m 表示。",
@@ -825,8 +840,8 @@ const zhHans: Messages = {
     hits: "命中",
     misses: "未命中",
     pricingTitle: "估计单价",
-    pricingTitleAttr: "官方 Usage 没有 cost。未回传成本时金额标为估计，默认输入约 $0.42／百万 token。",
-    pricingHint: "未回传成本时标为估计。",
+    pricingTitleAttr: "官方 Usage 没有 cost。未回传成本时金额标为估计。Jev 1.13 公布输入 $0.042／百万 token，输出免费。",
+    pricingHint: "未回传成本时标为估计。官方输入 $0.042／百万 token，输出免费。",
     inputRate: "输入 USD / 百万 tok",
     outputRate: "输出 USD / 百万 tok",
     lowThreshold: "低余额门槛",
@@ -834,7 +849,7 @@ const zhHans: Messages = {
     clearKey: "清除 API Key",
     billingTitle: "用量",
     billingIntro: "每次调用一笔；余额仅在 API 回传时显示。",
-    billingIntroLaya: "本机 · 无费用。",
+    billingIntroLaya: "本机 Ollama · 无费用。",
     insufficient: "TypeSafe 额度不足（HTTP 402）。",
     lowBalance: (credits) => `余额已低于门槛${credits == null ? "" : `（剩余 ${credits}）`}。`,
     loadingUsage: "加载用量…",
@@ -921,6 +936,9 @@ const en: Messages = {
     telegram: "Telegram",
     settings: "Settings",
     tags: "Tags",
+    hitLayout: "Hit layout",
+    layoutMasonry: "Masonry",
+    layoutAligned: "Aligned",
     batchFail: "Batch analysis failed",
     recentBatch: (message) => `Latest batch error: ${message}`,
     queue: "Queue",
@@ -962,6 +980,8 @@ const en: Messages = {
     dayToday: "Today",
     dayYesterday: "Yesterday",
     hitNew: "New",
+    jumpLatest: "Latest",
+    jumpLatestNew: (count) => `${count} new`,
     workerStatus: { idle: "Idle", packing: "Packing", judging: "Judging", done: "Done", error: "Retrying" },
   },
   tasks: {
@@ -1097,12 +1117,12 @@ const en: Messages = {
     backend: "Analysis backend",
     backendJev: "Jev",
     backendLaya: "Laya",
-    layaHint: "Local multilingual model. Untuned custom decisions stay near chance.",
-    layaConcurrency: "How many batches at once. One model copy; inferences run one by one.",
+    layaHint: "Runs on local Ollama, model laya. Official weights are English. Start Ollama first.",
+    layaConcurrency: "How many requests may be in flight. If Ollama runs one at a time, this is only that cap.",
     layaSpend: "local · no charge",
     unsavedBackend: (name) => `Not saved yet. Analysis is still ${name}.`,
-    layaActive: "Analysis is Laya. Local, no charge.",
-    savedLaya: "Saved. Analysis now uses Laya.",
+    layaActive: "Analysis is Laya, via local Ollama. Local, no charge.",
+    savedLaya: "Saved. Analysis now uses Laya on local Ollama.",
     concurrencyLegend: "Concurrency",
     concurrencyHint: "How many API calls at once.",
     concurrencyTitle: "How many asyncio coroutines judge at once. Not OS threads. The stage shows parallel n/m when busy.",
@@ -1116,8 +1136,8 @@ const en: Messages = {
     hits: "Hits",
     misses: "Misses",
     pricingTitle: "Estimated price",
-    pricingTitleAttr: "Official Usage has no cost. When cost is omitted, amounts are marked estimated. Default input is about $0.42 per million tokens.",
-    pricingHint: "Marked estimated when cost is omitted.",
+    pricingTitleAttr: "Official Usage has no cost. When cost is omitted, amounts are marked estimated. Published Jev 1.13 input is $0.042 per million tokens; output is free.",
+    pricingHint: "Marked estimated when cost is omitted. Official input is $0.042 per million tokens; output is free.",
     inputRate: "Input USD / million tok",
     outputRate: "Output USD / million tok",
     lowThreshold: "Low-balance threshold",
@@ -1125,7 +1145,7 @@ const en: Messages = {
     clearKey: "Clear API key",
     billingTitle: "Usage",
     billingIntro: "One row per call. Balance appears only when the API returns it.",
-    billingIntroLaya: "Local, no token charge.",
+    billingIntroLaya: "Local Ollama, no charge.",
     insufficient: "TypeSafe credits are insufficient (HTTP 402).",
     lowBalance: (credits) => `Balance is below the threshold${credits == null ? "" : ` (${credits} left)`}.`,
     loadingUsage: "Loading usage…",

@@ -35,7 +35,7 @@ export default function SettingsPage() {
   const [model, setModel] = useState("jev-1.13.0");
   const [backend, setBackend] = useState<"jev" | "laya">("jev");
   const [concurrency, setConcurrency] = useState(CONCURRENCY_DEFAULT);
-  const [inputRate, setInputRate] = useState("0.42");
+  const [inputRate, setInputRate] = useState("0.042");
   const [outputRate, setOutputRate] = useState("0");
   const [lowThreshold, setLowThreshold] = useState("0");
   const [maxAgeDays, setMaxAgeDays] = useState("0");
@@ -79,7 +79,7 @@ export default function SettingsPage() {
         setModel(value.model);
         setBackend(value.analysisBackend === "laya" ? "laya" : "jev");
         setConcurrency(clampConcurrency(value.concurrency));
-        setInputRate(String(value.inputUsdPerMtok ?? 0.42));
+        setInputRate(String(value.inputUsdPerMtok ?? 0.042));
         setOutputRate(String(value.outputUsdPerMtok ?? 0));
         setLowThreshold(String(value.lowCreditsThreshold ?? 0));
         setMaxAgeDays(String(value.analysisMaxAgeDays ?? 0));
@@ -350,7 +350,7 @@ export default function SettingsPage() {
                     <input
                       type="number"
                       min={0}
-                      step="0.01"
+                      step="0.001"
                       className="field-input font-mono"
                       value={inputRate}
                       onChange={(event) => setInputRate(event.target.value)}

@@ -470,7 +470,7 @@ async def list_queued(db: Database) -> list[dict[str, Any]]:
 
 
 async def latest_error_batch(db: Database) -> dict[str, Any] | None:
-    """Latest failed batch for the status banner. Read-only; never deletes the row."""
+    """Newest failed batch. Read-only; never deletes the row."""
     row = await db.fetch_one(
         "SELECT b.*, t.name AS task_name FROM analysis_batches b "
         "JOIN tasks t ON t.id = b.task_id "

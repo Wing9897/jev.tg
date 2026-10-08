@@ -243,6 +243,27 @@ const TASK_TONES = ["#67e8f9", "#facc15", "#c4b5fd", "#fb7185", "#fb923c", "#34d
 
 const HIT_GAP = 8;
 const HIT_COL_MIN = 300;
+const HIT_LAYOUT_KEY = "jev.hitLayout";
+
+type HitLayout = "masonry" | "aligned";
+
+function readHitLayout(): HitLayout {
+  try {
+    const raw = localStorage.getItem(HIT_LAYOUT_KEY);
+    if (raw === "masonry" || raw === "aligned") return raw;
+  } catch {
+    /* private mode or blocked storage */
+  }
+  return "masonry";
+}
+
+function storeHitLayout(next: HitLayout) {
+  try {
+    localStorage.setItem(HIT_LAYOUT_KEY, next);
+  } catch {
+    /* ignore quota / private mode */
+  }
+}
 
 function paletteIndex(seed: string, size: number) {
   let hash = 5381;
@@ -273,12 +294,39 @@ function hitBubblePlaying(card: HTMLElement) {
   return card.getAnimations().some((anim) => anim instanceof CSSAnimation && anim.animationName === "hit-bubble");
 }
 
+/** Card border-box can stay stuck on the image strip; size the brick from media plus body. */
+function brickHeight(card: HTMLElement) {
+  let content = 0;
+  for (const child of card.children) {
+    if (child instanceof HTMLElement) content += child.offsetHeight;
+  }
+  if (content <= 0) return card.offsetHeight;
+  const border = Math.max(0, card.offsetHeight - card.clientHeight);
+  return content + border;
+}
+
+function hitBrickCards(root: HTMLElement) {
+  return Array.from(root.children).filter(
+    (node): node is HTMLElement => node instanceof HTMLElement && node.classList.contains("result-card"),
+  );
+}
+
+function clearHitBricks(root: HTMLElement) {
+  root.style.height = "";
+  for (const card of hitBrickCards(root)) {
+    card.style.left = "";
+    card.style.top = "";
+    card.style.width = "";
+    card.style.height = "";
+    card.style.containIntrinsicSize = "";
+    card.style.contentVisibility = "";
+  }
+}
+
 function packHitBricks(root: HTMLElement) {
   const width = root.clientWidth;
   if (width <= 0) return;
-  const cards = Array.from(root.children).filter(
-    (node): node is HTMLElement => node instanceof HTMLElement && node.classList.contains("result-card"),
-  );
+  const cards = hitBrickCards(root);
   if (!cards.length) {
     root.style.height = "0px";
     return;
@@ -294,25 +342,34 @@ function packHitBricks(root: HTMLElement) {
     ws.push(Math.max(0, columnWidth));
     cursor += columnWidth + HIT_GAP;
   }
+  const measureWidth = Math.min(...ws);
   const bubbling = new Set(cards.filter(hitBubblePlaying));
-  cards.forEach((card, index) => {
-    const col = index % cols;
-    card.style.left = `${xs[col]}px`;
-    card.style.width = `${ws[col]}px`;
+  cards.forEach((card) => {
+    card.style.left = "0px";
+    card.style.top = "0px";
+    card.style.width = `${measureWidth}px`;
+    card.style.height = "auto";
+    card.style.containIntrinsicSize = "none";
     if (!bubbling.has(card)) card.style.contentVisibility = "visible";
   });
+  const measured = cards.map((card) => brickHeight(card));
   const heights = new Array<number>(cols).fill(0);
-  const measured = cards.map((card) => card.offsetHeight);
+  cards.forEach((card, index) => {
+    let col = 0;
+    for (let next = 1; next < cols; next += 1) {
+      if (heights[next] < heights[col]) col = next;
+    }
+    const y = heights[col];
+    card.style.left = `${xs[col]}px`;
+    card.style.width = `${ws[col]}px`;
+    card.style.top = `${y}px`;
+    const height = ws[col] === measureWidth ? measured[index] : brickHeight(card);
+    card.style.height = `${height}px`;
+    card.style.containIntrinsicSize = `${height}px`;
+    heights[col] = y + height + HIT_GAP;
+  });
   cards.forEach((card) => {
     if (!bubbling.has(card)) card.style.contentVisibility = "";
-  });
-  cards.forEach((card, index) => {
-    const col = index % cols;
-    const y = heights[col];
-    card.style.top = `${y}px`;
-    card.style.height = `${measured[index]}px`;
-    card.style.containIntrinsicSize = `${measured[index]}px`;
-    heights[col] = y + measured[index] + HIT_GAP;
   });
   root.style.height = `${Math.max(0, Math.max(...heights) - HIT_GAP)}px`;
 }
@@ -495,6 +552,33 @@ function keepDomRange(cards: HTMLElement[], scroller: HTMLElement) {
   return { start, end };
 }
 
+function hitsAreAtLatest(scroller: HTMLElement | null, view: Pick<HitsWindow, "abovePages" | "headStale">) {
+  return !!scroller && view.abovePages.length === 0 && !view.headStale && scroller.scrollTop <= HITS_AT_TOP_PX;
+}
+
+function scrollHitsToLatest(scroller: HTMLElement, reduce: boolean, genRef: { current: number }, jumping: { current: boolean }) {
+  const gen = (genRef.current += 1);
+  const start = scroller.scrollTop;
+  if (reduce || start <= 0) {
+    jumping.current = true;
+    if (start > 0) scroller.scrollTop = 0;
+    jumping.current = false;
+    return;
+  }
+  jumping.current = true;
+  const duration = 280;
+  const started = performance.now();
+  const step = (now: number) => {
+    if (genRef.current !== gen) return;
+    const progress = Math.min(1, (now - started) / duration);
+    const eased = 1 - (1 - progress) * (1 - progress);
+    scroller.scrollTop = start * (1 - eased);
+    if (progress < 1) requestAnimationFrame(step);
+    else if (genRef.current === gen) jumping.current = false;
+  };
+  requestAnimationFrame(step);
+}
+
 export default function StagePage({ taskPanel }: { taskPanel: ReactNode }) {
   const reduceMotion = useReducedMotion();
   const aiCoreRef = useRef<HTMLDivElement>(null);
@@ -536,6 +620,15 @@ export default function StagePage({ taskPanel }: { taskPanel: ReactNode }) {
   const pinTokenRef = useRef(0);
   const hitsHoldRef = useRef<HitsHold>({ hover: false, pointerDown: false, lightbox: false, lastActive: 0 });
   const seenCategoriesRef = useRef(new Map<string, string>());
+  const seenHitIdsRef = useRef(new Set<string>());
+  const parkedIncomingRef = useRef<HitExtract[]>([]);
+  const jumpingRef = useRef(false);
+  const jumpGenRef = useRef(0);
+  const jumpLockRef = useRef(false);
+  const snapTopRef = useRef(false);
+  const [awayNewCount, setAwayNewCount] = useState(0);
+  const [hitsAtLatest, setHitsAtLatest] = useState(true);
+  const [jumpBusy, setJumpBusy] = useState(false);
   appliedFiltersRef.current = applied;
   hitsViewRef.current = hitsView;
   hitRowsRef.current = hitsView.items;
@@ -546,12 +639,33 @@ export default function StagePage({ taskPanel }: { taskPanel: ReactNode }) {
   const [batchErrorFading, setBatchErrorFading] = useState(false);
   const [batchErrorShownAt, setBatchErrorShownAt] = useState(0);
   const [birthIds, setBirthIds] = useState<string[]>([]);
+  const [hitLayout, setHitLayout] = useState<HitLayout>(readHitLayout);
+  const chooseHitLayout = useCallback((next: HitLayout) => {
+    setHitLayout((current) => {
+      if (current === next) return current;
+      storeHitLayout(next);
+      return next;
+    });
+  }, []);
   const [handoffs, setHandoffs] = useState<QueueHandoff[]>([]);
 
   useEffect(() => {
     if (birthIds.length === 0) return;
     setBirthIds([]);
   }, [birthIds]);
+
+  useEffect(() => {
+    const seen = seenHitIdsRef.current;
+    const mounted = new Set<string>();
+    for (const item of hitsView.items) {
+      if (!item.id) continue;
+      seen.add(item.id);
+      mounted.add(item.id);
+    }
+    if (parkedIncomingRef.current.length) {
+      parkedIncomingRef.current = parkedIncomingRef.current.filter((item) => item.id && !mounted.has(item.id));
+    }
+  }, [hitsView.items]);
 
   stageRef.current = stage;
   reduceMotionRef.current = Boolean(reduceMotion);
@@ -570,26 +684,31 @@ export default function StagePage({ taskPanel }: { taskPanel: ReactNode }) {
     const fresh = cards.filter((card) => card.id && hitMatches(card, filtersNow));
     if (!fresh.length) return;
     const seen = new Set(hitRowsRef.current.map((item) => item.id));
+    for (const card of parkedIncomingRef.current) seen.add(card.id);
     const incoming = fresh.filter((card) => !seen.has(card.id));
     if (!incoming.length) return;
     const incomingIds = incoming.map((card) => card.id);
-    const headParked = hitsViewRef.current.abovePages.length > 0;
+    const incomingIdSet = new Set(incomingIds);
+    const mounted = hitsViewRef.current;
+    const headParked = mounted.abovePages.length > 0;
     const scroller = hitsScrollRef.current;
-    const atTop = !headParked && !!scroller && scroller.scrollTop <= HITS_AT_TOP_PX;
+    const atTop = hitsAreAtLatest(scroller, mounted);
+    if (!atTop) setAwayNewCount((count) => count + incoming.length);
+    if (headParked) parkedIncomingRef.current = dedupeHits([...incoming, ...parkedIncomingRef.current]);
     if (!headParked) {
       setBirthIds((current) => {
         const have = new Set(current);
         const extra = incomingIds.filter((id) => !have.has(id));
         return extra.length ? [...current, ...extra] : current;
       });
-      if (!atTop && scroller) {
+      if (!atTop && scroller && !jumpingRef.current) {
         const anchor = anchorCard(scroller);
         if (anchor) scrollPinRef.current = { mode: "pin", id: anchor.id, top: anchor.top, done: false };
       }
     }
     setHitsView((current) => {
       const seenNow = new Set(current.items.map((item) => item.id));
-      const incomingNow = fresh.filter((card) => !seenNow.has(card.id));
+      const incomingNow = fresh.filter((card) => card.id && incomingIdSet.has(card.id) && !seenNow.has(card.id));
       if (!incomingNow.length) return current;
       const add = incomingNow.length;
       if (current.abovePages.length > 0) {
@@ -690,7 +809,6 @@ export default function StagePage({ taskPanel }: { taskPanel: ReactNode }) {
             ...snapshot,
             concurrency: clampConcurrency(snapshot.concurrency ?? snapshot.workers.length ?? CONCURRENCY_DEFAULT),
             messageCount: extra > 0 ? Math.max(serverCount, optimistic) : serverCount,
-            results: [],
           };
           return stageViewSame(current, next) ? current : next;
         });
@@ -865,6 +983,7 @@ export default function StagePage({ taskPanel }: { taskPanel: ReactNode }) {
       hitsHasMoreRef.current = false;
       scrollPinRef.current = null;
       suppressEdgeRef.current = false;
+      parkedIncomingRef.current = [];
     }
     hitsBusyRef.current = true;
     hitsHoldRef.current.lastActive = Date.now();
@@ -1087,6 +1206,71 @@ export default function StagePage({ taskPanel }: { taskPanel: ReactNode }) {
 
   loadHitsRef.current = loadHits;
 
+  const syncLatest = useCallback(() => {
+    const at = hitsAreAtLatest(hitsScrollRef.current, hitsViewRef.current);
+    setHitsAtLatest((current) => (current === at ? current : at));
+    if (at) setAwayNewCount(0);
+  }, []);
+
+  const loadNewestHits = useCallback(async () => {
+    const gen = (hitsGenRef.current += 1);
+    hitsBusyRef.current = true;
+    hitsHoldRef.current.lastActive = Date.now();
+    scrollPinRef.current = null;
+    const filtersNow = appliedFiltersRef.current;
+    const seen = seenHitIdsRef.current;
+    for (const item of hitsViewRef.current.items) {
+      if (item.id) seen.add(item.id);
+    }
+    try {
+      const page = await api.results({
+        limit: HITS_PAGE_SIZE,
+        q: filtersNow.query,
+        taskId: filtersNow.taskId,
+        category: filtersNow.category,
+        minNoul: filtersNow.minNoul,
+      });
+      if (hitsGenRef.current !== gen) return;
+      const pageItems = page.items.map((item) => asHit(item)).filter((item) => item.id);
+      let hasMore = Boolean(page.hasMore && page.nextCursor);
+      if (!pageItems.length) hasMore = false;
+      hitsMoreFailedRef.current = false;
+      hitsNewerFailedRef.current = false;
+      hitsCursorRef.current = hasMore ? page.nextCursor : null;
+      hitsHasMoreRef.current = hasMore;
+      const pending = parkedIncomingRef.current.filter((item) => item.id && hitMatches(item, filtersNow));
+      const pageIds = new Set(pageItems.map((item) => item.id));
+      const extras = pending.filter((item) => !pageIds.has(item.id));
+      const items = dedupeHits([...extras, ...pageItems]);
+      const unseen = items.map((item) => item.id).filter((id) => !seen.has(id));
+      const ahead = Math.max(0, items.length - pageItems.length);
+      suppressEdgeRef.current = true;
+      snapTopRef.current = true;
+      setHitsView((current) => ({
+        ...EMPTY_HITS_WINDOW,
+        items,
+        total: Math.max(page.total + ahead, current.total),
+        hasMore,
+      }));
+      if (unseen.length) {
+        setBirthIds((current) => {
+          const have = new Set(current);
+          const extra = unseen.filter((id) => !have.has(id));
+          return extra.length ? [...current, ...extra] : current;
+        });
+      }
+    } catch (err) {
+      if (hitsGenRef.current !== gen) return;
+      snapTopRef.current = false;
+      setError(errorText(err));
+    } finally {
+      if (hitsGenRef.current === gen) {
+        hitsBusyRef.current = false;
+        hitsHoldRef.current.lastActive = Date.now();
+      }
+    }
+  }, []);
+
   useEffect(() => {
     const textChanged = filters.query !== applied.query || filters.minNoul !== applied.minNoul;
     const selectChanged = filters.taskId !== applied.taskId || filters.category !== applied.category;
@@ -1098,6 +1282,11 @@ export default function StagePage({ taskPanel }: { taskPanel: ReactNode }) {
   const appliedKey = `${applied.query}\0${applied.taskId}\0${applied.category}\0${applied.minNoul}`;
   useEffect(() => {
     seenCategoriesRef.current.clear();
+    jumpGenRef.current += 1;
+    jumpingRef.current = false;
+    snapTopRef.current = false;
+    setAwayNewCount(0);
+    setHitsAtLatest(true);
     hitsScrollRef.current?.scrollTo({ top: 0 });
     void loadHitsRef.current("replace");
   }, [appliedKey]);
@@ -1123,6 +1312,8 @@ export default function StagePage({ taskPanel }: { taskPanel: ReactNode }) {
     hitsHoldRef.current.lastActive = Date.now();
     hitsMoreFailedRef.current = false;
     hitsNewerFailedRef.current = false;
+    syncLatest();
+    if (jumpingRef.current) return;
     const el = hitsScrollRef.current;
     if (!el || hitsBusyRef.current) return;
     const edges = readEdges(el);
@@ -1135,6 +1326,49 @@ export default function StagePage({ taskPanel }: { taskPanel: ReactNode }) {
     if ((view.hasMore || view.belowCount > 0) && edges.distDown < edge) {
       void loadHitsRef.current("older");
     }
+  }, [syncLatest]);
+
+  useLayoutEffect(() => {
+    const scroller = hitsScrollRef.current;
+    if (snapTopRef.current && scroller) {
+      snapTopRef.current = false;
+      suppressEdgeRef.current = false;
+      if (scroller.scrollTop > 0) {
+        pinAdjustingRef.current = true;
+        scroller.scrollTop = 0;
+        pinAdjustingRef.current = false;
+      }
+    }
+    syncLatest();
+  }, [hitsView.items, hitsView.abovePages, hitsView.headStale, syncLatest]);
+
+  const jumpToLatest = useCallback(async () => {
+    if (jumpLockRef.current) return;
+    jumpLockRef.current = true;
+    setJumpBusy(true);
+    try {
+      const view = hitsViewRef.current;
+      const headMissing = view.abovePages.length > 0 || view.headStale;
+      if (headMissing) {
+        jumpGenRef.current += 1;
+        jumpingRef.current = false;
+        await loadNewestHits();
+        return;
+      }
+      const scroller = hitsScrollRef.current;
+      if (!scroller) return;
+      scrollHitsToLatest(scroller, wantsReducedMotion(reduceMotionRef.current), jumpGenRef, jumpingRef);
+    } finally {
+      jumpLockRef.current = false;
+      setJumpBusy(false);
+    }
+  }, [loadNewestHits]);
+
+  const cancelHitJump = useCallback((target?: EventTarget | null) => {
+    if (!jumpingRef.current) return;
+    if (target instanceof Element && target.closest(".hits-jump")) return;
+    jumpGenRef.current += 1;
+    jumpingRef.current = false;
   }, []);
 
   const onSpacerDelta = useCallback((above: number, below: number) => {
@@ -1170,7 +1404,7 @@ export default function StagePage({ taskPanel }: { taskPanel: ReactNode }) {
       if (id) keepIds.add(id);
     }
     if (!keepIds.size) return;
-    const atTop = view.abovePages.length === 0 && scroller.scrollTop <= HITS_AT_TOP_PX;
+    const atTop = hitsAreAtLatest(scroller, view);
     const snapshot = view.items;
     const released = releaseOutside(view, keepIds, atTop);
     if (!released || sameItemIds(released.view.items, snapshot)) return;
@@ -1313,6 +1547,24 @@ export default function StagePage({ taskPanel }: { taskPanel: ReactNode }) {
               <button type="button" className="icon-btn" aria-label={m.stage.telegram} title={m.stage.telegram} onClick={() => openShellDialog("telegram")}>
                 <TelegramMark />
               </button>
+              <span className="layout-switch" role="group" aria-label={m.stage.hitLayout}>
+                <button
+                  type="button"
+                  className={hitLayout === "masonry" ? "is-on" : undefined}
+                  aria-pressed={hitLayout === "masonry"}
+                  onClick={() => chooseHitLayout("masonry")}
+                >
+                  {m.stage.layoutMasonry}
+                </button>
+                <button
+                  type="button"
+                  className={hitLayout === "aligned" ? "is-on" : undefined}
+                  aria-pressed={hitLayout === "aligned"}
+                  onClick={() => chooseHitLayout("aligned")}
+                >
+                  {m.stage.layoutAligned}
+                </button>
+              </span>
               <button type="button" className="icon-btn" aria-label={m.stage.settings} title={m.stage.settings} onClick={() => openShellDialog("settings")}>
                 <SettingsMark />
               </button>
@@ -1422,10 +1674,12 @@ export default function StagePage({ taskPanel }: { taskPanel: ReactNode }) {
             hitsHoldRef.current.hover = false;
             hitsHoldRef.current.lastActive = Date.now();
           }}
-          onPointerDown={() => {
+          onPointerDown={(event) => {
             hitsHoldRef.current.pointerDown = true;
             hitsHoldRef.current.lastActive = Date.now();
+            cancelHitJump(event.target);
           }}
+          onWheel={() => cancelHitJump()}
         >
           <div className="column-head">
             <h2 id="results-heading">{m.stage.results}</h2>
@@ -1490,10 +1744,15 @@ export default function StagePage({ taskPanel }: { taskPanel: ReactNode }) {
             loadingMore={hitsLoadingMore}
             loadingNewer={hitsLoadingNewer}
             birthIds={birthIds}
+            layout={hitLayout}
             tags={tags}
             locale={locale}
             scrollRef={hitsScrollRef}
             onScroll={onHitsScroll}
+            atLatest={hitsAtLatest}
+            awayCount={awayNewCount}
+            jumpBusy={jumpBusy}
+            onJumpLatest={() => void jumpToLatest()}
             holdRef={hitsHoldRef}
             scrollPinRef={scrollPinRef}
             pinAdjustingRef={pinAdjustingRef}
@@ -1863,10 +2122,15 @@ const HitsPane = memo(function HitsPane({
   loadingMore,
   loadingNewer,
   birthIds,
+  layout,
   tags,
   locale,
   scrollRef,
   onScroll,
+  atLatest,
+  awayCount,
+  jumpBusy,
+  onJumpLatest,
   holdRef,
   scrollPinRef,
   pinAdjustingRef,
@@ -1879,10 +2143,15 @@ const HitsPane = memo(function HitsPane({
   loadingMore: boolean;
   loadingNewer: boolean;
   birthIds: readonly string[];
+  layout: HitLayout;
   tags: Tag[];
   locale: Locale;
   scrollRef: MutableRefObject<HTMLDivElement | null>;
   onScroll: () => void;
+  atLatest: boolean;
+  awayCount: number;
+  jumpBusy: boolean;
+  onJumpLatest: () => void;
   holdRef: MutableRefObject<HitsHold>;
   scrollPinRef: MutableRefObject<ScrollPin | null>;
   pinAdjustingRef: MutableRefObject<boolean>;
@@ -1929,7 +2198,10 @@ const HitsPane = memo(function HitsPane({
     if (!host) return;
     let lastWidth = -1;
     const pack = () => {
-      host.querySelectorAll<HTMLElement>(".hit-grid").forEach((grid) => packHitBricks(grid));
+      host.querySelectorAll<HTMLElement>(".hit-grid").forEach((grid) => {
+        if (layout === "aligned") clearHitBricks(grid);
+        else packHitBricks(grid);
+      });
       lastWidth = host.clientWidth;
     };
     pack();
@@ -1972,6 +2244,7 @@ const HitsPane = memo(function HitsPane({
       }
     }
     const observer = new ResizeObserver(() => {
+      if (layout === "aligned") return;
       if (Math.abs(host.clientWidth - lastWidth) < 1) return;
       pack();
     });
@@ -1979,19 +2252,38 @@ const HitsPane = memo(function HitsPane({
     let cancelFonts = false;
     const fonts = document.fonts;
     void fonts.ready.then(() => {
-      if (cancelFonts || scrollRef.current !== host) return;
+      if (cancelFonts || layout === "aligned" || scrollRef.current !== host) return;
       pack();
     });
+    let mediaPack = 0;
+    const onMedia = (event: Event) => {
+      const target = event.target;
+      if (layout === "aligned") return;
+      if (!(target instanceof HTMLImageElement) || !target.closest(".hit-media")) return;
+      if (mediaPack) return;
+      mediaPack = window.requestAnimationFrame(() => {
+        mediaPack = 0;
+        if (scrollRef.current !== host) return;
+        pack();
+      });
+    };
+    host.addEventListener("load", onMedia, true);
+    host.addEventListener("error", onMedia, true);
     return () => {
       cancelFonts = true;
+      if (mediaPack) window.cancelAnimationFrame(mediaPack);
+      host.removeEventListener("load", onMedia, true);
+      host.removeEventListener("error", onMedia, true);
       observer.disconnect();
     };
-  }, [items, aboveHeight, belowHeight, locale, scrollRef, scrollPinRef, pinAdjustingRef, onSpacerDelta]);
+  }, [items, aboveHeight, belowHeight, locale, layout, scrollRef, scrollPinRef, pinAdjustingRef, onSpacerDelta]);
   const now = new Date(dayClock);
   const birthSet = useMemo(() => new Set(birthIds), [birthIds]);
+  const jumpLabel = awayCount > 0 ? m.stage.jumpLatestNew(awayCount > 99 ? "99+" : String(awayCount)) : m.stage.jumpLatest;
   let bornOrdinal = 0;
   return (
     <>
+      <div className="hits-scroll-host">
       <div ref={scrollRef} className="column-scroll hits-scroll" aria-busy={loadingNewer || loadingMore || undefined} onScroll={onScroll}>
         {items.length === 0 ? (
           loading ? (
@@ -2013,7 +2305,7 @@ const HitsPane = memo(function HitsPane({
                       <span>{label}</span>
                     </p>
                   ) : null}
-                  <div className="hit-grid">
+                  <div className={layout === "aligned" ? "hit-grid is-aligned" : "hit-grid"}>
                     {group.items.map((item) => {
                       let bornDelayMs: number | null = null;
                       if (birthSet.has(item.id)) {
@@ -2044,6 +2336,31 @@ const HitsPane = memo(function HitsPane({
             {m.stage.loadingMore}
           </p>
         ) : null}
+      </div>
+      {!atLatest && preview == null ? (
+        <button
+          type="button"
+          className={awayCount > 0 ? "hits-jump is-new" : "hits-jump"}
+          aria-live="polite"
+          aria-busy={jumpBusy || undefined}
+          title={jumpLabel}
+          onMouseDown={(event) => event.preventDefault()}
+          onWheel={(event) => {
+            const scroller = scrollRef.current;
+            if (!scroller) return;
+            scroller.scrollTop += event.deltaY;
+          }}
+          onClick={(event) => {
+            event.currentTarget.blur();
+            onJumpLatest();
+          }}
+        >
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M6 14.5 12 8.5l6 6" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+          </svg>
+          <span>{jumpLabel}</span>
+        </button>
+      ) : null}
       </div>
       {preview ? <HitLightbox preview={preview} onClose={closeHitImage} onIndex={moveHitImage} /> : null}
     </>

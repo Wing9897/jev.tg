@@ -23,10 +23,10 @@ from server.util import new_id, utc_now_iso
 logger = logging.getLogger(__name__)
 
 RATES_NOTE = (
-    "TypeSafe 官方 Usage 只有 input_tokens / output_tokens，沒有 cost_usd 或餘額。"
+    "TypeSafe 官方 Usage 只有 input_tokens / output_tokens，沒有 cost、快取 token 或餘額。"
     "OpenAPI 標註輸入 token 為 billable、輸出目前免費。"
-    "預設估計單價沿用 hosted jevtypesafeai 約 $0.42 / 百萬輸入 token；"
-    "直連 api.typesafe.ai 實際費率可能不同。請只在 API 未回傳 cost 時把結果標為「估計」。"
+    "docs.typesafe.ai/models 公布 Jev 1.13 輸入 $42／十億 token（$0.042／百萬），輸出免費。"
+    "API 未回傳美元金額，所以本機依該單價計算並標為「估計」。"
 )
 
 COST_KEYS = ("cost_usd", "costUsd", "usd_cost", "total_cost_usd", "totalCostUsd")

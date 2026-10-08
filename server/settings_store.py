@@ -16,11 +16,13 @@ DEFAULT_MODEL = "jev-1.13.0"
 MIN_CONCURRENCY = 1
 MAX_CONCURRENCY = 16
 DEFAULT_CONCURRENCY = 4
-# Hosted jevtypesafeai was ~$0.42 / million input tokens. TypeSafe OpenAPI Usage
-# marks input as billable and output as currently free; the official response has
-# no cost_usd, so this is only a labeled 估計 fallback.
-DEFAULT_INPUT_USD_PER_MTOK = 0.42
+# https://docs.typesafe.ai/models (2026-10-08): Jev 1.13 is $42 / Btok = $0.042 / Mtok,
+# charged on input tokens only. Output tokens are free. Usage has no dollar field,
+# so this remains a labeled 估計 fallback.
+DEFAULT_INPUT_USD_PER_MTOK = 0.042
 DEFAULT_OUTPUT_USD_PER_MTOK = 0.0
+# Earlier builds stored the hosted jevtypesafeai guess. That figure is 10x the published rate.
+STALE_INPUT_USD_PER_MTOK = 0.42
 DEFAULT_LOW_CREDITS_THRESHOLD = 0.0
 # 0 means every stored message is eligible. Positive values are a claim window only.
 DEFAULT_ANALYSIS_MAX_AGE_DAYS = 0
@@ -65,8 +67,8 @@ def clamp_concurrency(value: Any) -> int:
 def live_worker_count(_backend: Any, concurrency: int) -> int:
     """In-flight batch slots for either backend. Same stored 1–16 cap.
 
-    Jev: that many TypeSafe calls at once. Laya: that many batch jobs may be
-    queued or running. Laya still loads one model; inference stays on one lock.
+    Jev: that many TypeSafe calls at once. Laya: that many Ollama requests may
+    be in flight. This does not mean Ollama keeps more than one model copy.
     """
     return clamp_concurrency(concurrency)
 
@@ -148,8 +150,13 @@ class SettingsStore:
         return value
 
     async def billing_rates(self) -> dict[str, float]:
+        input_rate = await self._get_float(KEY_INPUT_USD_PER_MTOK, DEFAULT_INPUT_USD_PER_MTOK)
+        raw_input = (await self.get_raw(KEY_INPUT_USD_PER_MTOK, "")).strip()
+        if raw_input and abs(input_rate - STALE_INPUT_USD_PER_MTOK) <= 1e-9:
+            input_rate = DEFAULT_INPUT_USD_PER_MTOK
+            await self.set_raw(KEY_INPUT_USD_PER_MTOK, str(DEFAULT_INPUT_USD_PER_MTOK))
         return {
-            "input_usd_per_mtok": await self._get_float(KEY_INPUT_USD_PER_MTOK, DEFAULT_INPUT_USD_PER_MTOK),
+            "input_usd_per_mtok": input_rate,
             "output_usd_per_mtok": await self._get_float(KEY_OUTPUT_USD_PER_MTOK, DEFAULT_OUTPUT_USD_PER_MTOK),
         }
 
