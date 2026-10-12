@@ -1,13 +1,14 @@
-"""Laya through local Ollama. The app does not import the Python `laya` package.
+"""Laya through a local System One endpoint. The app does not import the Python `laya` package.
 
-Official model page (2026-10-08): https://ollama.com/library/laya
-Tag `laya` is Convai Innovations' decision model. Ollama serves it at
-``POST /v1/systemone`` with Jev's choice / score / noul questions. The library
-page's ``ollama pull laya`` tag is the one this process calls. Sibling
-checkpoints such as ``laya-multilingual`` are not that tag.
-
-Default daemon: http://127.0.0.1:11434. This module never downloads weights.
+Ollama's official tag ``laya`` (https://ollama.com/library/laya) and Unsloth Desktop's
+Decision API (https://unsloth.ai/docs/models/decision-laya) both accept
+``POST /v1/systemone`` with model ``laya``. Unsloth documents the same body:
+``model``, ``state`` (a string or any JSON), and ``questions``. This module sends
+that body to whichever host the setting names. It never downloads weights.
 Hit images are not part of ``state``.
+
+Ollama: http://127.0.0.1:11434
+Unsloth Desktop: http://127.0.0.1:8888
 """
 
 from __future__ import annotations
@@ -17,15 +18,21 @@ import json
 import urllib.error
 import urllib.request
 from collections.abc import Mapping
+from dataclasses import dataclass
 from typing import Any
 
 from server.jev import category_choice, scored_message
 
 # https://ollama.com/library/laya — official tag, not a user-typed name.
 OLLAMA_BASE_URL = "http://127.0.0.1:11434"
+# https://unsloth.ai/docs/models/decision-laya — Decision API, model name `laya`.
+UNSLOTH_BASE_URL = "http://127.0.0.1:8888"
 OLLAMA_LAYA_MODEL = "laya"
 OLLAMA_TIMEOUT_SECONDS = 120
 OLLAMA_DOWN = "無法連上 Ollama。請先啟動 Ollama（http://127.0.0.1:11434）。"
+OLLAMA_MISSING = "Ollama 還沒有 laya。請先執行 ollama pull laya，並確認 Ollama 已啟動。"
+UNSLOTH_DOWN = "無法連上 Unsloth Desktop。請先啟動 Unsloth Desktop（http://127.0.0.1:8888）。"
+UNSLOTH_MISSING = "Unsloth Desktop 還沒有 Laya。請先啟動 Unsloth Desktop，並確認 Laya 可用。"
 
 _CATEGORY_CHARS = 4_000
 
@@ -96,11 +103,49 @@ def category_question(categories: list[dict[str, str]]) -> dict[str, Any] | None
     }
 
 
-def _post_systemone(payload: dict[str, Any]) -> dict[str, Any]:
+@dataclass(frozen=True)
+class _Host:
+    base_url: str
+    down: str
+    missing_model: str
+    missing_endpoint: str
+    bad_json: str
+    bad_answers: str
+    name: str
+
+
+_OLLAMA_HOST = _Host(
+    base_url=OLLAMA_BASE_URL,
+    down=OLLAMA_DOWN,
+    missing_model=OLLAMA_MISSING,
+    missing_endpoint="這版 Ollama 沒有 /v1/systemone。請升級到 0.40.0 或更新後再試。",
+    bad_json="Ollama 沒有回傳 Laya 的 JSON。",
+    bad_answers="Ollama 沒有回傳 Laya 的 answers。",
+    name="Ollama",
+)
+_UNSLOTH_HOST = _Host(
+    base_url=UNSLOTH_BASE_URL,
+    down=UNSLOTH_DOWN,
+    missing_model=UNSLOTH_MISSING,
+    missing_endpoint="Unsloth Desktop 沒有 /v1/systemone。請先啟動 Unsloth Desktop，並確認 Laya 可用。",
+    bad_json="Unsloth Desktop 沒有回傳 Laya 的 JSON。",
+    bad_answers="Unsloth Desktop 沒有回傳 Laya 的 answers。",
+    name="Unsloth Desktop",
+)
+
+
+def laya_host(runtime: str | None) -> _Host:
+    if str(runtime or "").strip().lower() == "unsloth":
+        return _UNSLOTH_HOST
+    return _OLLAMA_HOST
+
+
+def _post_systemone(payload: dict[str, Any], runtime: str = "ollama") -> dict[str, Any]:
     """One `/v1/systemone` call. Connection failures stay a short Chinese error."""
+    host = laya_host(runtime)
     body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     request = urllib.request.Request(
-        f"{OLLAMA_BASE_URL}/v1/systemone",
+        f"{host.base_url}/v1/systemone",
         data=body,
         headers={"Content-Type": "application/json", "Accept": "application/json"},
         method="POST",
@@ -110,28 +155,28 @@ def _post_systemone(payload: dict[str, Any]) -> dict[str, Any]:
             raw = response.read()
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="replace")
-        raise LayaError(_http_failure(exc.code, detail)) from exc
+        raise LayaError(_http_failure(exc.code, detail, host)) from exc
     except (urllib.error.URLError, TimeoutError, OSError) as exc:
-        raise LayaError(OLLAMA_DOWN) from exc
+        raise LayaError(host.down) from exc
     try:
         parsed = json.loads(raw.decode("utf-8"))
     except (UnicodeError, json.JSONDecodeError) as exc:
-        raise LayaError("Ollama 沒有回傳 Laya 的 JSON。") from exc
+        raise LayaError(host.bad_json) from exc
     if not isinstance(parsed, dict):
-        raise LayaError("Ollama 沒有回傳 Laya 的 answers。")
+        raise LayaError(host.bad_answers)
     return parsed
 
 
-def _http_failure(status: int, body: str) -> str:
+def _http_failure(status: int, body: str, host: _Host) -> str:
     detail = _error_text(body)
     lowered = detail.casefold()
     if status == 404 and "model" in lowered and "not found" in lowered:
-        return "Ollama 還沒有 laya。請先執行 ollama pull laya，並確認 Ollama 已啟動。"
+        return host.missing_model
     if status == 404:
-        return "這版 Ollama 沒有 /v1/systemone。請升級到 0.40.0 或更新後再試。"
+        return host.missing_endpoint
     if detail:
-        return f"Ollama 拒絕這次 Laya 請求（HTTP {status}）：{detail}"
-    return f"Ollama 拒絕這次 Laya 請求（HTTP {status}）。"
+        return f"{host.name} 拒絕這次 Laya 請求（HTTP {status}）：{detail}"
+    return f"{host.name} 拒絕這次 Laya 請求（HTTP {status}）。"
 
 
 def _error_text(body: str) -> str:
@@ -146,19 +191,21 @@ def _error_text(body: str) -> str:
     return " ".join(body.split())[:240]
 
 
-def _answer_from(result: Mapping[str, Any], key: str) -> dict[str, Any]:
+def _answer_from(result: Mapping[str, Any], key: str, host: _Host) -> dict[str, Any]:
     answers = result.get("answers")
     answer = answers.get(key) if isinstance(answers, dict) else None
     if not isinstance(answer, dict):
-        raise LayaError("Ollama 沒有回傳 Laya 的 answers。")
+        raise LayaError(host.bad_answers)
     return answer
 
 
-def _score_ollama(
+def _score_laya(
     task_prompt: str,
     messages: list[dict[str, Any]],
     categories: list[dict[str, str]],
+    runtime: str,
 ) -> dict[str, Any]:
+    host = laya_host(runtime)
     prompt = task_prompt.strip()
     scored: list[dict[str, Any]] = []
     raw_answers: dict[str, Any] = {}
@@ -168,9 +215,10 @@ def _score_ollama(
                 "model": OLLAMA_LAYA_MODEL,
                 "state": message_state(message),
                 "questions": {"hit": {"type": "noul", "instructions": prompt}},
-            }
+            },
+            runtime,
         )
-        answer = _answer_from(result, "hit")
+        answer = _answer_from(result, "hit", host)
         scored.append(scored_message(index, message, noul_from_laya_answer(answer)))
         raw_answers[f"m{index}"] = answer
 
@@ -183,9 +231,10 @@ def _score_ollama(
                 "model": OLLAMA_LAYA_MODEL,
                 "state": _category_state(messages),
                 "questions": {"category": question},
-            }
+            },
+            runtime,
         )
-        choice = _answer_from(result, "category")
+        choice = _answer_from(result, "category", host)
         if not choice.get("choice"):
             raise LayaError("Laya 未回傳類型 choice")
         category = str(choice.get("choice"))
@@ -208,9 +257,12 @@ async def judge_laya_batch(
     task_prompt: str,
     messages: list[dict[str, Any]],
     categories: list[dict[str, str]],
+    runtime: str = "ollama",
 ) -> dict[str, Any]:
-    """Score one batch on local Ollama. Callers limit how many of these are in flight."""
-    return await asyncio.to_thread(_score_ollama, task_prompt, messages, categories)
+    """Score one batch on the selected local runtime. Callers limit how many are in flight."""
+    host = laya_host(runtime)
+    chosen = "unsloth" if host is _UNSLOTH_HOST else "ollama"
+    return await asyncio.to_thread(_score_laya, task_prompt, messages, categories, chosen)
 
 
 def _category_state(messages: list[dict[str, Any]]) -> dict[str, str]:

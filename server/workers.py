@@ -1,8 +1,9 @@
 """Queue filler and one worker slot per shared concurrency setting.
 
 The saved analysis backend chooses the judge. `_judge_jev` is a TypeSafe call
-per slot. `_judge_laya` may have that many Ollama requests in flight. Ollama
-may still run them one at a time; this process does not claim extra copies.
+per slot. `_judge_laya` may have that many local requests in flight, on Ollama
+or Unsloth Desktop. The runtime may still run them one at a time; this process
+does not claim extra copies.
 Billing is recorded on each path; Laya meta never invents a Jev USD amount.
 """
 
@@ -439,6 +440,7 @@ class WorkerPool:
                 task_prompt=str(task.get("prompt") or ""),
                 messages=messages,
                 categories=choice_tags(list(task.get("tags") or [])),
+                runtime=await self.settings.get_laya_runtime(),
             )
         except asyncio.CancelledError:
             raise

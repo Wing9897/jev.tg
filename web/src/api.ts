@@ -50,6 +50,7 @@ export const api = {
     analysisMaxAgeDays?: number;
     analysisPaused?: boolean;
     analysisBackend?: "jev" | "laya";
+    layaRuntime?: "ollama" | "unsloth";
   }) => request<Settings>("/api/settings", { method: "PUT", body: JSON.stringify(body) }),
   billingSummary: (backend?: "jev" | "laya") => {
     const search = new URLSearchParams();

@@ -34,6 +34,7 @@ export default function SettingsPage() {
   const [keyFocused, setKeyFocused] = useState(false);
   const [model, setModel] = useState("jev-1.13.0");
   const [backend, setBackend] = useState<"jev" | "laya">("jev");
+  const [runtime, setRuntime] = useState<"ollama" | "unsloth">("ollama");
   const [concurrency, setConcurrency] = useState(CONCURRENCY_DEFAULT);
   const [inputRate, setInputRate] = useState("0.042");
   const [outputRate, setOutputRate] = useState("0");
@@ -78,6 +79,7 @@ export default function SettingsPage() {
         setSettings(value);
         setModel(value.model);
         setBackend(value.analysisBackend === "laya" ? "laya" : "jev");
+        setRuntime(value.layaRuntime === "unsloth" ? "unsloth" : "ollama");
         setConcurrency(clampConcurrency(value.concurrency));
         setInputRate(String(value.inputUsdPerMtok ?? 0.042));
         setOutputRate(String(value.outputUsdPerMtok ?? 0));
@@ -112,6 +114,7 @@ export default function SettingsPage() {
         typesafeApiKey: typedKey && typedKey !== SAVED_KEY_MASK ? typedKey : undefined,
         model,
         analysisBackend: backend,
+        layaRuntime: runtime,
         concurrency: clampConcurrency(concurrency),
         inputUsdPerMtok: Number(inputRate),
         outputUsdPerMtok: Number(outputRate),
@@ -127,7 +130,10 @@ export default function SettingsPage() {
       setMaxAgeDays(String(next.analysisMaxAgeDays ?? 0));
       setConcurrency(clampConcurrency(next.concurrency));
       setBackend(next.analysisBackend === "laya" ? "laya" : "jev");
-      setMessage(next.analysisBackend === "laya" ? "saved-laya" : "saved");
+      setRuntime(next.layaRuntime === "unsloth" ? "unsloth" : "ollama");
+      setMessage(
+        next.analysisBackend !== "laya" ? "saved" : next.layaRuntime === "unsloth" ? "saved-laya-unsloth" : "saved-laya",
+      );
       notifySettingsChanged();
       await loadBilling(ledgerOffset, backend);
     } catch (err) {
@@ -162,15 +168,20 @@ export default function SettingsPage() {
       ? m.settings.saved
       : message === "saved-laya"
         ? m.settings.savedLaya
-        : message === "cleared"
-          ? m.settings.cleared
-          : message;
+        : message === "saved-laya-unsloth"
+          ? m.settings.savedLayaUnsloth
+          : message === "cleared"
+            ? m.settings.cleared
+            : message;
   const savedBackend = settings?.analysisBackend === "laya" ? "laya" : "jev";
+  const savedRuntime = settings?.layaRuntime === "unsloth" ? "unsloth" : "ollama";
   const layaForm = backend === "laya";
+  const unslothForm = layaForm && runtime === "unsloth";
   const emptyUsage = !layaForm && !usagePending && (summary?.allTime.calls ?? 0) === 0;
   // Same split as server billing `_backend_scope`: Laya rows only, or every row that is not Laya.
   const ledgerRows = ledger.filter((row) => (layaForm ? row.backend === "laya" : row.backend !== "laya"));
   const backendDirty = !loading && settings != null && backend !== savedBackend;
+  const runtimeDirty = layaForm && !loading && settings != null && runtime !== savedRuntime;
   const keyIsSet = Boolean(settings?.typesafeApiKeySet);
   const showSavedKeyMask = keyIsSet && apiKey === "" && !keyFocused;
 
@@ -209,7 +220,7 @@ export default function SettingsPage() {
 
         <div className="settings-columns">
           <div className="settings-col">
-            <Field label={m.settings.backend} hint={layaForm ? m.settings.layaHint : undefined}>
+            <Field label={m.settings.backend}>
               <select
                 className="field-input"
                 value={backend}
@@ -223,8 +234,30 @@ export default function SettingsPage() {
               <p role="status" className="dialog-warn">
                 {m.settings.unsavedBackend(savedBackend === "laya" ? m.settings.backendLaya : m.settings.backendJev)}
               </p>
-            ) : layaForm ? (
-              <p className="dialog-note">{m.settings.layaActive}</p>
+            ) : null}
+            {layaForm ? (
+              <Field
+                label={m.settings.layaRuntime}
+                hint={unslothForm ? m.settings.layaHintUnsloth : m.settings.layaHint}
+              >
+                <select
+                  className="field-input"
+                  value={runtime}
+                  onChange={(event) => setRuntime(event.target.value === "unsloth" ? "unsloth" : "ollama")}
+                >
+                  <option value="ollama">{m.settings.layaRuntimeOllama}</option>
+                  <option value="unsloth">{m.settings.layaRuntimeUnsloth}</option>
+                </select>
+              </Field>
+            ) : null}
+            {runtimeDirty ? (
+              <p role="status" className="dialog-warn">
+                {m.settings.unsavedBackend(
+                  savedRuntime === "unsloth" ? m.settings.layaRuntimeUnsloth : m.settings.layaRuntimeOllama,
+                )}
+              </p>
+            ) : layaForm && !backendDirty ? (
+              <p className="dialog-note">{unslothForm ? m.settings.layaActiveUnsloth : m.settings.layaActive}</p>
             ) : null}
             {layaForm ? null : (
               <>
@@ -262,7 +295,13 @@ export default function SettingsPage() {
             )}
             <Field
               label={m.settings.concurrencyLegend}
-              hint={layaForm ? m.settings.layaConcurrency : m.settings.concurrencyHint}
+              hint={
+                unslothForm
+                  ? m.settings.layaConcurrencyUnsloth
+                  : layaForm
+                    ? m.settings.layaConcurrency
+                    : m.settings.concurrencyHint
+              }
               labelTitle={m.settings.concurrencyTitle}
             >
               <div className="inline-control">

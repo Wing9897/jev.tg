@@ -230,11 +230,18 @@ export type Messages = {
     backendJev: string;
     backendLaya: string;
     layaHint: string;
+    layaHintUnsloth: string;
+    layaRuntime: string;
+    layaRuntimeOllama: string;
+    layaRuntimeUnsloth: string;
     layaConcurrency: string;
+    layaConcurrencyUnsloth: string;
     layaSpend: string;
     unsavedBackend: (name: string) => string;
     layaActive: string;
+    layaActiveUnsloth: string;
     savedLaya: string;
+    savedLayaUnsloth: string;
     concurrencyLegend: string;
     concurrencyHint: string;
     concurrencyTitle: string;
@@ -526,11 +533,18 @@ const zhHant: Messages = {
     backendJev: "Jev",
     backendLaya: "Laya",
     layaHint: "經本機 Ollama 執行（模型 laya，官方權重為英文）。請先啟動 Ollama。",
+    layaHintUnsloth: "經本機 Unsloth Desktop 執行（模型 laya）。請先啟動 Unsloth Desktop，並確認 Laya 可用。",
+    layaRuntime: "本機執行環境",
+    layaRuntimeOllama: "Ollama",
+    layaRuntimeUnsloth: "Unsloth Desktop",
     layaConcurrency: "同時最多幾筆請求在途。Ollama 若一次只處理一題，這只是在途上限。",
+    layaConcurrencyUnsloth: "同時最多幾筆請求在途。Unsloth Desktop 若一次只處理一題，這只是在途上限。",
     layaSpend: "本機 · 無費用",
     unsavedBackend: (name) => `尚未儲存。目前分析仍是 ${name}。`,
     layaActive: "目前分析是 Laya，經本機 Ollama。本機 · 無費用。",
+    layaActiveUnsloth: "目前分析是 Laya，經本機 Unsloth Desktop。本機 · 無費用。",
     savedLaya: "已儲存。分析改走本機 Ollama 的 Laya。",
+    savedLayaUnsloth: "已儲存。分析改走本機 Unsloth Desktop 的 Laya。",
     concurrencyLegend: "並行",
     concurrencyHint: "同時幾路 API。",
     concurrencyTitle: "同時判斷的 asyncio 協程數，不是系統執行緒。舞台忙碌時以並行 n/m 表示。",
@@ -822,11 +836,18 @@ const zhHans: Messages = {
     backendJev: "Jev",
     backendLaya: "Laya",
     layaHint: "经本机 Ollama 执行（模型 laya，官方权重为英文）。请先启动 Ollama。",
+    layaHintUnsloth: "经本机 Unsloth Desktop 执行（模型 laya）。请先启动 Unsloth Desktop，并确认 Laya 可用。",
+    layaRuntime: "本机执行环境",
+    layaRuntimeOllama: "Ollama",
+    layaRuntimeUnsloth: "Unsloth Desktop",
     layaConcurrency: "同时最多几笔请求在途。Ollama 若一次只处理一题，这只是在途上限。",
+    layaConcurrencyUnsloth: "同时最多几笔请求在途。Unsloth Desktop 若一次只处理一题，这只是在途上限。",
     layaSpend: "本机 · 无费用",
     unsavedBackend: (name) => `尚未保存。当前分析仍是 ${name}。`,
     layaActive: "当前分析是 Laya，经本机 Ollama。本机 · 无费用。",
+    layaActiveUnsloth: "当前分析是 Laya，经本机 Unsloth Desktop。本机 · 无费用。",
     savedLaya: "已保存。分析改走本机 Ollama 的 Laya。",
+    savedLayaUnsloth: "已保存。分析改走本机 Unsloth Desktop 的 Laya。",
     concurrencyLegend: "并行",
     concurrencyHint: "同时几路 API。",
     concurrencyTitle: "同时判断的 asyncio 协程数，不是系统线程。舞台忙碌时以并行 n/m 表示。",
@@ -1118,11 +1139,18 @@ const en: Messages = {
     backendJev: "Jev",
     backendLaya: "Laya",
     layaHint: "Runs on local Ollama, model laya. Official weights are English. Start Ollama first.",
+    layaHintUnsloth: "Runs on local Unsloth Desktop, model laya. Start Unsloth Desktop and make sure Laya is available.",
+    layaRuntime: "Local runtime",
+    layaRuntimeOllama: "Ollama",
+    layaRuntimeUnsloth: "Unsloth Desktop",
     layaConcurrency: "How many requests may be in flight. If Ollama runs one at a time, this is only that cap.",
+    layaConcurrencyUnsloth: "How many requests may be in flight. If Unsloth Desktop runs one at a time, this is only that cap.",
     layaSpend: "local · no charge",
     unsavedBackend: (name) => `Not saved yet. Analysis is still ${name}.`,
     layaActive: "Analysis is Laya, via local Ollama. Local, no charge.",
+    layaActiveUnsloth: "Analysis is Laya, via local Unsloth Desktop. Local, no charge.",
     savedLaya: "Saved. Analysis now uses Laya on local Ollama.",
+    savedLayaUnsloth: "Saved. Analysis now uses Laya on local Unsloth Desktop.",
     concurrencyLegend: "Concurrency",
     concurrencyHint: "How many API calls at once.",
     concurrencyTitle: "How many asyncio coroutines judge at once. Not OS threads. The stage shows parallel n/m when busy.",

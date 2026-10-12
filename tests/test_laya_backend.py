@@ -20,13 +20,16 @@ from server.laya import (
     OLLAMA_BASE_URL,
     OLLAMA_DOWN,
     OLLAMA_LAYA_MODEL,
+    UNSLOTH_BASE_URL,
+    UNSLOTH_DOWN,
+    UNSLOTH_MISSING,
     LayaError,
     category_question,
     judge_laya_batch,
     message_state,
     noul_from_laya_answer,
 )
-from server.settings_store import SettingsStore, live_worker_count, parse_analysis_backend
+from server.settings_store import SettingsStore, live_worker_count, parse_analysis_backend, parse_laya_runtime
 from server.sse import SseBroadcaster
 from server.util import utc_now_iso
 from server.workers import WorkerPool, WorkerState
@@ -58,10 +61,23 @@ class BackendDefaultTests(unittest.TestCase):
                     self.assertEqual((await settings.snapshot())["analysis_backend"], "jev")
                     await settings.set_analysis_backend("laya")
                     self.assertEqual(await settings.get_analysis_backend(), "laya")
+                    self.assertEqual(await settings.get_laya_runtime(), "ollama")
+                    self.assertEqual((await settings.snapshot())["laya_runtime"], "ollama")
+                    await settings.set_laya_runtime("unsloth")
+                    self.assertEqual(await settings.get_laya_runtime(), "unsloth")
+                    self.assertEqual((await settings.snapshot())["laya_runtime"], "unsloth")
+                    await settings.set_laya_runtime("nope")
+                    self.assertEqual(await settings.get_laya_runtime(), "ollama")
                 finally:
                     await database.close()
 
         asyncio.run(run())
+
+    def test_laya_runtime_defaults_to_ollama(self) -> None:
+        self.assertEqual(parse_laya_runtime(None), "ollama")
+        self.assertEqual(parse_laya_runtime(""), "ollama")
+        self.assertEqual(parse_laya_runtime("mlx"), "ollama")
+        self.assertEqual(parse_laya_runtime("UNSLOTH"), "unsloth")
 
 
 class NoulMappingTests(unittest.TestCase):
@@ -96,13 +112,14 @@ class LayaCallTests(unittest.TestCase):
     def test_user_path_is_the_official_ollama_tag(self) -> None:
         self.assertEqual(OLLAMA_LAYA_MODEL, "laya")
         self.assertEqual(OLLAMA_BASE_URL, "http://127.0.0.1:11434")
+        self.assertEqual(UNSLOTH_BASE_URL, "http://127.0.0.1:8888")
         self.assertNotIn("multilingual", OLLAMA_LAYA_MODEL)
 
     def test_ollama_skips_images_and_typesafe(self) -> None:
         async def run() -> None:
             calls: list[dict[str, Any]] = []
 
-            def post(payload: dict[str, Any]) -> dict[str, Any]:
+            def post(payload: dict[str, Any], _runtime: str = "ollama") -> dict[str, Any]:
                 calls.append(payload)
                 questions = payload["questions"]
                 if "category" in questions:
@@ -150,7 +167,7 @@ class LayaCallTests(unittest.TestCase):
             peak = 0
             gate = threading.Lock()
 
-            def post(payload: dict[str, Any]) -> dict[str, Any]:
+            def post(payload: dict[str, Any], _runtime: str = "ollama") -> dict[str, Any]:
                 nonlocal current, peak
                 with gate:
                     current += 1
@@ -211,6 +228,81 @@ class LayaCallTests(unittest.TestCase):
         self.assertIn("ollama pull laya", text)
         self.assertNotIn("Traceback", text)
 
+    def test_default_batch_posts_to_ollama(self) -> None:
+        async def run() -> None:
+            seen: list[tuple[str, dict[str, Any]]] = []
+
+            def fake_open(request: Any, timeout: Any = None) -> _JsonResponse:
+                self.assertEqual(timeout, 120)
+                seen.append((request.full_url, json.loads(request.data.decode())))
+                return _JsonResponse({"answers": {"hit": {"type": "noul", "noul": 0.33}}})
+
+            message = {"id": "m", "content": "你好", "chat_name": "c", "sender_name": "s", "timestamp": "t"}
+            with patch("server.laya.urllib.request.urlopen", fake_open):
+                judged = await judge_laya_batch(task_prompt="相關嗎", messages=[message], categories=[])
+            self.assertEqual(seen[0][0], "http://127.0.0.1:11434/v1/systemone")
+            self.assertEqual(seen[0][1]["model"], "laya")
+            self.assertEqual(set(seen[0][1]), {"model", "state", "questions"})
+            self.assertEqual(judged["messages"][0]["noul"], 0.33)
+
+        asyncio.run(run())
+
+    def test_error_text_differs_by_runtime(self) -> None:
+        from email.message import Message
+        from io import BytesIO
+
+        from server import laya as laya_mod
+
+        payload = {"model": "laya", "state": "hi", "questions": {}}
+
+        def refuse(*_args: Any, **_kwargs: Any) -> None:
+            raise urllib.error.URLError(ConnectionRefusedError(10061, "refused"))
+
+        with patch("server.laya.urllib.request.urlopen", refuse):
+            with self.assertRaises(LayaError) as ollama_down:
+                laya_mod._post_systemone(payload)
+            with self.assertRaises(LayaError) as unsloth_down:
+                laya_mod._post_systemone(payload, runtime="unsloth")
+        self.assertEqual(str(ollama_down.exception), OLLAMA_DOWN)
+        self.assertEqual(str(unsloth_down.exception), UNSLOTH_DOWN)
+        self.assertNotIn("ollama pull", str(unsloth_down.exception))
+        self.assertNotIn("Ollama", str(unsloth_down.exception))
+
+        def missing(*_args: Any, **_kwargs: Any) -> None:
+            body = BytesIO(json.dumps({"error": "model 'laya' not found"}).encode())
+            raise urllib.error.HTTPError(
+                "http://127.0.0.1/v1/systemone",
+                404,
+                "Not Found",
+                Message(),
+                body,
+            )
+
+        with patch("server.laya.urllib.request.urlopen", missing):
+            with self.assertRaises(LayaError) as ollama_missing:
+                laya_mod._post_systemone(payload)
+            with self.assertRaises(LayaError) as unsloth_missing:
+                laya_mod._post_systemone(payload, runtime="unsloth")
+        self.assertIn("ollama pull laya", str(ollama_missing.exception))
+        unsloth_text = str(unsloth_missing.exception)
+        self.assertEqual(unsloth_text, UNSLOTH_MISSING)
+        self.assertIn("啟動 Unsloth Desktop", unsloth_text)
+        self.assertNotIn("ollama pull", unsloth_text.casefold())
+
+
+class _JsonResponse:
+    def __init__(self, payload: dict[str, Any]) -> None:
+        self._raw = json.dumps(payload).encode()
+
+    def read(self) -> bytes:
+        return self._raw
+
+    def __enter__(self) -> "_JsonResponse":
+        return self
+
+    def __exit__(self, *_args: object) -> bool:
+        return False
+
 
 class BillingLabelTests(unittest.TestCase):
     def test_laya_row_has_no_invented_usd(self) -> None:
@@ -262,13 +354,16 @@ class WorkerBranchTests(unittest.TestCase):
     def test_laya_error_releases_markers(self) -> None:
         asyncio.run(self._run_laya_error())
 
+    def test_saved_unsloth_posts_to_8888(self) -> None:
+        asyncio.run(self._run_saved_unsloth())
+
     async def _run_laya_success(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
             database, settings, batch = await _seed_batch(folder, backend="laya")
             typesafe = AsyncMock(side_effect=AssertionError("TypeSafe"))
             seen: list[str] = []
 
-            def post(payload: dict[str, Any]) -> dict[str, Any]:
+            def post(payload: dict[str, Any], _runtime: str = "ollama") -> dict[str, Any]:
                 seen.append(str(payload["model"]))
                 return {"answers": {"hit": {"type": "noul", "noul": 0.2}}}
 
@@ -309,7 +404,7 @@ class WorkerBranchTests(unittest.TestCase):
                     "raw": {"model": "jev-1.13.0"},
                 }
 
-            def post(_payload: dict[str, Any]) -> None:
+            def post(_payload: dict[str, Any], _runtime: str = "ollama") -> None:
                 loaded.append("ollama")
                 raise AssertionError("Ollama")
 
@@ -331,7 +426,7 @@ class WorkerBranchTests(unittest.TestCase):
             database, settings, batch = await _seed_batch(folder, backend="laya")
             attempts = 0
 
-            def post(_payload: dict[str, Any]) -> None:
+            def post(_payload: dict[str, Any], _runtime: str = "ollama") -> None:
                 nonlocal attempts
                 attempts += 1
                 raise LayaError(OLLAMA_DOWN)
@@ -350,10 +445,40 @@ class WorkerBranchTests(unittest.TestCase):
                 self.assertIn("啟動 Ollama", str(stored["error_message"]))
                 self.assertNotIn("Traceback", str(stored["error_message"]))
                 self.assertNotIn("uv sync", str(stored["error_message"]))
+                self.assertNotIn("Unsloth", str(stored["error_message"]))
                 recent = await latest_error_batch(database)
                 assert recent is not None
                 self.assertEqual(recent["id"], "b1")
                 self.assertEqual(recent["status"], "error")
+            finally:
+                await database.close()
+
+    async def _run_saved_unsloth(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            database, settings, batch = await _seed_batch(folder, backend="laya")
+            await settings.set_laya_runtime("unsloth")
+            seen: list[tuple[str, dict[str, Any]]] = []
+
+            def fake_open(request: Any, timeout: Any = None) -> _JsonResponse:
+                self.assertEqual(timeout, 120)
+                seen.append((request.full_url, json.loads(request.data.decode())))
+                return _JsonResponse({"answers": {"hit": {"type": "noul", "noul": 0.2}}})
+
+            try:
+                with patch("server.workers.judge_batch", AsyncMock(side_effect=AssertionError("TypeSafe"))), patch(
+                    "server.laya.urllib.request.urlopen", fake_open
+                ):
+                    await _process(database, settings, batch)
+                self.assertEqual(len(seen), 1)
+                url, body = seen[0]
+                self.assertEqual(url, "http://127.0.0.1:8888/v1/systemone")
+                self.assertEqual(body["model"], "laya")
+                self.assertEqual(set(body), {"model", "state", "questions"})
+                self.assertEqual(body["questions"]["hit"]["type"], "noul")
+                self.assertNotIn("ollama pull", json.dumps(body))
+                stored = await database.fetch_one("SELECT status FROM analysis_batches WHERE id = 'b1'")
+                assert stored is not None
+                self.assertEqual(stored["status"], "miss")
             finally:
                 await database.close()
 

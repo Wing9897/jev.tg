@@ -53,7 +53,7 @@ npm run dev
 
 資料目錄預設是專案裡的 `data/`。要用別的路徑時設定 `JEV_TG_DATA_DIR`。設定頁還沒寫入金鑰時，後端會讀環境變數 `TYPESAFE_API_KEY`。
 
-Laya 走本機 Ollama 的 `POST /v1/systemone`，模型名稱是 `laya`。權重由 Ollama 管理，不在這個 repo，程式也不會自行下載。Ollama 預設位址是 `http://127.0.0.1:11434`。沒有啟動時，分析會顯示請先啟動 Ollama。
+Laya 走本機 `POST /v1/systemone`，模型名稱是 `laya`。預設是 Ollama（`http://127.0.0.1:11434`）。設定裡可改走 Unsloth Desktop（`http://127.0.0.1:8888`）。權重由該程式管理，不在這個 repo，程式也不會自行下載。沒有啟動時，分析會指出要開的是 Ollama 還是 Unsloth Desktop。
 
 ## 系統匣
 

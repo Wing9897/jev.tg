@@ -103,6 +103,7 @@ export interface Settings {
   lowCreditsThreshold: number;
   analysisMaxAgeDays: number;
   analysisBackend: "jev" | "laya";
+  layaRuntime: "ollama" | "unsloth";
   analysisPaused: boolean;
 }
 

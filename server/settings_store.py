@@ -45,8 +45,11 @@ KEY_INSUFFICIENT_MSG = "billing_insufficient_message"
 KEY_ANALYSIS_MAX_AGE_DAYS = "analysis_max_age_days"
 KEY_ANALYSIS_PAUSED = "analysis_paused"
 KEY_ANALYSIS_BACKEND = "analysis_backend"
+KEY_LAYA_RUNTIME = "laya_runtime"
 DEFAULT_ANALYSIS_BACKEND = "jev"
+DEFAULT_LAYA_RUNTIME = "ollama"
 ANALYSIS_BACKENDS = ("jev", "laya")
+LAYA_RUNTIMES = ("ollama", "unsloth")
 
 
 def parse_analysis_backend(value: Any) -> str:
@@ -54,6 +57,13 @@ def parse_analysis_backend(value: Any) -> str:
     if text in ANALYSIS_BACKENDS:
         return text
     return DEFAULT_ANALYSIS_BACKEND
+
+
+def parse_laya_runtime(value: Any) -> str:
+    text = str(value or "").strip().lower()
+    if text in LAYA_RUNTIMES:
+        return text
+    return DEFAULT_LAYA_RUNTIME
 
 
 def clamp_concurrency(value: Any) -> int:
@@ -67,8 +77,9 @@ def clamp_concurrency(value: Any) -> int:
 def live_worker_count(_backend: Any, concurrency: int) -> int:
     """In-flight batch slots for either backend. Same stored 1–16 cap.
 
-    Jev: that many TypeSafe calls at once. Laya: that many Ollama requests may
-    be in flight. This does not mean Ollama keeps more than one model copy.
+    Jev: that many TypeSafe calls at once. Laya: that many local requests may
+    be in flight, on Ollama or Unsloth Desktop. This does not mean the runtime
+    keeps more than one model copy.
     """
     return clamp_concurrency(concurrency)
 
@@ -184,6 +195,12 @@ class SettingsStore:
     async def set_analysis_backend(self, value: str) -> None:
         await self.set_raw(KEY_ANALYSIS_BACKEND, parse_analysis_backend(value))
 
+    async def get_laya_runtime(self) -> str:
+        return parse_laya_runtime(await self.get_raw(KEY_LAYA_RUNTIME, DEFAULT_LAYA_RUNTIME))
+
+    async def set_laya_runtime(self, value: str) -> None:
+        await self.set_raw(KEY_LAYA_RUNTIME, parse_laya_runtime(value))
+
     async def analysis_paused(self) -> bool:
         return (await self.get_raw(KEY_ANALYSIS_PAUSED, "0")).strip() == "1"
 
@@ -260,6 +277,7 @@ class SettingsStore:
             "low_credits_threshold": await self.get_low_credits_threshold(),
             "analysis_max_age_days": await self.get_analysis_max_age_days(),
             "analysis_backend": await self.get_analysis_backend(),
+            "laya_runtime": await self.get_laya_runtime(),
             "analysis_paused": await self.analysis_paused(),
             "last_credits_remaining": last_credits,
             "last_credits_at": last_credits_at,

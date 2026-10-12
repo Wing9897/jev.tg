@@ -11,6 +11,7 @@ from pydantic import AliasGenerator, BaseModel, ConfigDict, Field
 from server import batches, billing, tags as tagstore
 from server.settings_store import (
     ANALYSIS_BACKENDS,
+    LAYA_RUNTIMES,
     MAX_ANALYSIS_MAX_AGE_DAYS,
     MAX_CONCURRENCY,
     MIN_CONCURRENCY,
@@ -49,6 +50,7 @@ class SettingsUpdate(CamelModel):
     analysis_max_age_days: int | None = Field(default=None, ge=0, le=MAX_ANALYSIS_MAX_AGE_DAYS)
     analysis_paused: bool | None = None
     analysis_backend: Literal["jev", "laya"] | None = None
+    laya_runtime: Literal["ollama", "unsloth"] | None = None
 
 
 class PhoneLoginBody(CamelModel):
@@ -156,6 +158,10 @@ async def put_settings(request: Request, body: SettingsUpdate) -> dict[str, Any]
             raise HTTPException(status_code=400, detail="analysis_backend 必須是 jev 或 laya")
         await store.set_analysis_backend(body.analysis_backend)
         pool_dirty = True
+    if body.laya_runtime is not None:
+        if body.laya_runtime not in LAYA_RUNTIMES:
+            raise HTTPException(status_code=400, detail="laya_runtime 必須是 ollama 或 unsloth")
+        await store.set_laya_runtime(body.laya_runtime)
     if pool_dirty:
         live = live_worker_count(await store.get_analysis_backend(), await store.get_concurrency())
         await ctx(request).workers.resize(live)
