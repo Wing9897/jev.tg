@@ -155,6 +155,11 @@ input[type="checkbox"]:disabled {
 
 :root {
   --page-gutter: 1.5rem;
+  --surface-line: rgba(36, 48, 68, 0.95);
+  --surface-fill: rgba(7, 11, 18, 0.55);
+  --surface-card: #121a28;
+  --surface-panel: #0e1624;
+  --surface-line-hot: #3d5470;
 }
 
 .app-shell {
@@ -237,19 +242,29 @@ input[type="checkbox"]:disabled {
   position: relative;
   z-index: 5;
   display: flex;
-  flex-wrap: nowrap;
+  flex-wrap: wrap;
   align-items: center;
-  gap: 8px 14px;
+  gap: 6px 14px;
   flex-shrink: 0;
   min-width: 0;
-  overflow: hidden;
+  overflow: visible;
   font-family: var(--font-mono);
   font-size: 11px;
   letter-spacing: 0.04em;
   color: #94a3b8;
 }
 
-.stage-metrics > span:not(.status-warn):not(.stage-metrics-end) {
+.stage-metrics-stats {
+  display: flex;
+  align-items: center;
+  gap: 8px 14px;
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  letter-spacing: 0;
+}
+
+.stage-metrics-stats > span:not(.status-warn) {
   flex: 0 1 auto;
   min-width: 0;
   overflow: hidden;
@@ -261,15 +276,62 @@ input[type="checkbox"]:disabled {
   margin-left: auto;
   display: inline-flex;
   align-items: center;
-  gap: 0.65rem;
-  flex: 0 0 auto;
+  justify-content: flex-end;
+  gap: 10px;
+  flex: 0 1 auto;
+  min-width: min(100%, max-content);
+  max-width: 100%;
+  overflow: visible;
   white-space: nowrap;
+}
+
+.stage-controls {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 6px;
+  flex: 0 0 auto;
+  max-width: 100%;
+}
+
+.stage-metrics-end > .conn-status,
+.stage-metrics-end > .billing-chip {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.stage-metrics-end > .conn-status > span:not(.status-lamp),
+.stage-metrics-end > .billing-chip > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.stage-metrics-end > .stage-controls {
+  flex: 1 1 auto;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.stage-controls > .icon-btn {
+  flex: 0 0 auto;
 }
 
 .shell-actions {
   display: inline-flex;
+  flex-wrap: wrap;
   align-items: center;
-  gap: 4px;
+  justify-content: flex-end;
+  gap: 6px;
+  flex: 1 1 auto;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.shell-actions > .icon-btn,
+.shell-actions > .layout-switch {
   flex: 0 0 auto;
 }
 
@@ -279,8 +341,8 @@ input[type="checkbox"]:disabled {
   height: 26px;
   padding: 2px;
   border-radius: 999px;
-  border: 1px solid rgba(36, 48, 68, 0.95);
-  background: rgba(7, 11, 18, 0.55);
+  border: 1px solid var(--surface-line);
+  background: var(--surface-fill);
   flex: 0 0 auto;
 }
 
@@ -323,8 +385,8 @@ input[type="checkbox"]:disabled {
   margin: 0;
   padding: 0;
   border-radius: 999px;
-  border: 1px solid rgba(36, 48, 68, 0.95);
-  background: rgba(7, 11, 18, 0.55);
+  border: 1px solid var(--surface-line);
+  background: var(--surface-fill);
   color: #94a3b8;
   cursor: pointer;
 }
@@ -360,8 +422,8 @@ input[type="checkbox"]:disabled {
 
 .icon-btn:disabled:hover {
   color: #94a3b8;
-  border-color: rgba(36, 48, 68, 0.95);
-  background: rgba(7, 11, 18, 0.55);
+  border-color: var(--surface-line);
+  background: var(--surface-fill);
 }
 
 .icon-btn.is-open {
@@ -376,7 +438,7 @@ input[type="checkbox"]:disabled {
   min-width: 148px;
   padding: 4px;
   border-radius: 10px;
-  border: 1px solid rgba(36, 48, 68, 0.95);
+  border: 1px solid var(--surface-line);
   background: rgba(10, 14, 22, 0.96);
   box-shadow: 0 16px 40px rgba(0, 0, 0, 0.45);
 }
@@ -523,7 +585,7 @@ input[type="checkbox"]:disabled {
   flex-direction: column;
   border-radius: 12px;
   border: 1px solid var(--color-line);
-  background: #0e1624;
+  background: var(--surface-panel);
   overflow: hidden;
 }
 
@@ -557,7 +619,7 @@ input[type="checkbox"]:disabled {
   overflow: auto;
   overscroll-behavior: contain;
   padding: 2px 8px 8px;
-  background: #0e1624;
+  background: var(--surface-panel);
 }
 
 .count-badge {
@@ -699,6 +761,18 @@ input[type="checkbox"]:disabled {
   animation-duration: 1.05s;
 }
 
+.ai-presence.is-error .ai-core {
+  border-color: rgba(251, 113, 133, 0.55);
+}
+
+.ai-presence.is-error .ai-core-glow {
+  box-shadow: 0 0 14px rgba(251, 113, 133, 0.45);
+}
+
+.ai-presence.is-error .ai-core-pupil {
+  background: #fb7185;
+}
+
 .ai-presence.is-idle .ai-core-glow,
 .ai-presence.is-idle .ai-core-ring,
 .ai-presence.is-idle .ai-core-pupil {
@@ -719,7 +793,7 @@ input[type="checkbox"]:disabled {
 .ai-meter {
   height: 6px;
   border-radius: 999px;
-  background: rgba(36, 48, 68, 0.95);
+  background: var(--surface-line);
   overflow: hidden;
 }
 
@@ -751,7 +825,7 @@ input[type="checkbox"]:disabled {
 .queue-card {
   border-radius: 12px;
   border: 1px solid var(--color-line);
-  background: #121a28;
+  background: var(--surface-card);
   padding: 10px 12px;
 }
 
@@ -800,8 +874,8 @@ input[type="checkbox"]:disabled {
   min-width: 0;
   max-width: 100%;
   border-radius: 10px;
-  border: 1px solid rgba(163, 230, 53, 0.22);
-  background: #121a28;
+  border: 1px solid var(--color-line);
+  background: var(--surface-card);
   padding: 0;
   overflow-x: clip;
   overflow-y: clip;
@@ -813,7 +887,7 @@ input[type="checkbox"]:disabled {
 
 .result-card:hover,
 .result-card:focus-within {
-  border-color: rgba(163, 230, 53, 0.42);
+  border-color: var(--surface-line-hot);
 }
 
 .result-card.is-born {
@@ -1255,7 +1329,7 @@ input[type="checkbox"]:disabled {
   pointer-events: auto;
   border-radius: 12px;
   border: 1px solid rgba(34, 211, 238, 0.22);
-  background: #121a28;
+  background: var(--surface-card);
   padding: 8px 12px;
   font-size: 13px;
 }
@@ -1300,7 +1374,7 @@ input[type="checkbox"]:disabled {
   overflow: hidden;
   border-radius: 12px;
   border: 1px solid var(--color-line);
-  background: #0e1624;
+  background: var(--surface-panel);
   padding: 8px 10px 8px;
 }
 
@@ -1312,7 +1386,7 @@ input[type="checkbox"]:disabled {
   position: sticky;
   top: 0;
   z-index: 1;
-  background: #0e1624;
+  background: var(--surface-panel);
 }
 
 .module-card > :not(.dense-list) {
@@ -1368,7 +1442,7 @@ input[type="checkbox"]:disabled {
   padding: 5px 7px;
   border-radius: 8px;
   border: 1px solid var(--color-line);
-  background: #121a28;
+  background: var(--surface-card);
   content-visibility: auto;
   contain-intrinsic-size: auto 72px;
 }
@@ -1596,7 +1670,7 @@ input[type="checkbox"]:disabled {
 }
 
 .dialog-panel {
-  --dlg: #121a28;
+  --dlg: var(--surface-card);
   width: min(30rem, 100%);
   max-height: calc(100dvh - 40px);
   display: flex;
@@ -1826,7 +1900,7 @@ input[type="checkbox"]:disabled {
   gap: 8px;
   margin: -14px -16px 0;
   padding: 14px 16px 10px;
-  background: var(--dlg, #121a28);
+  background: var(--dlg, var(--surface-card));
   border-bottom: 1px solid rgba(148, 163, 184, 0.08);
 }
 
@@ -2401,9 +2475,20 @@ select.field-input {
     overflow: visible;
   }
 
+  .stage-metrics-stats {
+    flex: 1 1 auto;
+  }
+
   .stage-metrics-end {
     flex: 1 1 100%;
     justify-content: flex-end;
+    overflow: visible;
+  }
+
+  .stage-controls {
+    flex: 1 1 auto;
+    min-width: 0;
+    max-width: 100%;
   }
 
   .status-warn {

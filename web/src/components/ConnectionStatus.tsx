@@ -24,25 +24,35 @@ export function ConnectionStatus({ sse, telegram }: { sse: SseStatus; telegram: 
 export function AnalysisToggle() {
   const [paused, setPaused] = useState<boolean | null>(null);
   const saving = useRef(false);
+  const revision = useRef(0);
 
   useEffect(() => {
     let cancelled = false;
-    void api
-      .settings()
-      .then((value) => {
-        if (!cancelled) setPaused(Boolean(value.analysisPaused));
-      })
-      .catch(() => {
-        if (!cancelled) setPaused(false);
-      });
+    let timer = 0;
+    const pull = () => {
+      const gen = revision.current;
+      void api
+        .settings()
+        .then((value) => {
+          if (cancelled || gen !== revision.current) return;
+          setPaused(Boolean(value.analysisPaused));
+        })
+        .catch(() => {
+          if (cancelled) return;
+          timer = window.setTimeout(pull, 2000);
+        });
+    };
+    pull();
     return () => {
       cancelled = true;
+      window.clearTimeout(timer);
     };
   }, []);
 
   function toggle() {
     if (paused == null || saving.current) return;
     const next = !paused;
+    revision.current += 1;
     saving.current = true;
     setPaused(next);
     void api

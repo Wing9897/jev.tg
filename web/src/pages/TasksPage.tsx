@@ -63,13 +63,14 @@ export default function TasksPage() {
     setTasks(taskResp.tasks);
     setTags(tagResp.tags);
     applySubscribed(channelResp.channels, req);
+    setListError(null);
     setLoading(false);
     if (announce) notifyTasksChanged();
   }
 
   useEffect(() => {
     void load().catch((err: unknown) => {
-      setError(errorText(err));
+      setListError(errorText(err));
       setLoading(false);
     });
   }, []);
@@ -169,12 +170,17 @@ export default function TasksPage() {
 
   async function remove(id: string) {
     if (!window.confirm(m.tasks.confirmDelete)) return;
-    await api.deleteTask(id);
-    await load(true);
-    if (editing === id) {
-      setEditing(null);
-      setForm(emptyForm);
-      setFormOpen(false);
+    setListError(null);
+    try {
+      await api.deleteTask(id);
+      await load(true);
+      if (editing === id) {
+        setEditing(null);
+        setForm(emptyForm);
+        setFormOpen(false);
+      }
+    } catch (err) {
+      setListError(errorText(err));
     }
   }
 
@@ -241,7 +247,7 @@ export default function TasksPage() {
         {loading ? (
           <p className="module-kicker">{m.tasks.loading}</p>
         ) : tasks.length === 0 ? (
-          <p className="module-kicker">{m.tasks.empty}</p>
+          listError ? null : <p className="module-kicker">{m.tasks.empty}</p>
         ) : (
           <div className="dense-list">
             {tasks.map((task) => {

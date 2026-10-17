@@ -294,7 +294,13 @@ class WorkerPool:
         messages = await batches.load_batch_source_messages(self.db, batch)
         if not messages:
             await batches.release_markers(self.db, str(batch["id"]))
-            await batches.complete_batch(self.db, batch_id=str(batch["id"]), status="error", error_message="批次沒有訊息")
+            completed = await batches.complete_batch(
+                self.db, batch_id=str(batch["id"]), status="error", error_message="批次沒有訊息"
+            )
+            self.sse.publish("batch_error", {**(completed or {"id": batch["id"]}), "worker_id": worker.worker_id})
+            worker.status = "error"
+            self._publish_worker(worker)
+            await asyncio.sleep(0.55)
             self._idle(worker)
             return
 

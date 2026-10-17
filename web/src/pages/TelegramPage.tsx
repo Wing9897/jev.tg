@@ -363,6 +363,20 @@ export default function TelegramPage() {
     }
   }
 
+  async function disconnectAccount() {
+    if (busy) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await api.disconnectTelegram();
+      await refresh();
+    } catch (err) {
+      setError(errorText(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function syncChannels() {
     setBusy(true);
     setError(null);
@@ -415,7 +429,7 @@ export default function TelegramPage() {
               {m.telegram.channels(subscribedCount)}
             </button>
             {status?.status === "connected" ? (
-              <button type="button" className="dlg-btn danger" onClick={() => void api.disconnectTelegram().then(refresh)}>
+              <button type="button" className="dlg-btn danger" onClick={() => void disconnectAccount()}>
                 {m.telegram.disconnect}
               </button>
             ) : null}

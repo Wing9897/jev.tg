@@ -77,12 +77,17 @@ export default function TagsPage() {
 
   async function remove(id: string) {
     if (!window.confirm(m.tags.confirmDelete)) return;
-    await api.deleteTag(id);
-    await load();
-    if (editing === id) {
-      setEditing(null);
-      setForm(emptyForm);
-      setFormOpen(false);
+    setError(null);
+    try {
+      await api.deleteTag(id);
+      await load();
+      if (editing === id) {
+        setEditing(null);
+        setForm(emptyForm);
+        setFormOpen(false);
+      }
+    } catch (err) {
+      setError(errorText(err));
     }
   }
 
